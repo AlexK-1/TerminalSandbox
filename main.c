@@ -1,0 +1,457 @@
+#include <stdio.h>
+#include <string.h>
+#include <time.h>
+#include <stdlib.h>
+#include <stdbool.h>
+#include <ctype.h>
+#include <ncurses.h>
+//#include <curses.h>
+
+#define NS 1000000000 // Количество наносекунд в секунде
+#define DEFAULT_TARGET_TPS 30
+#define CURSOR_ID 10 // Номер цветовой пары для курсора
+#define CURSOR_SPRITE '*' // Символ курсора, если будет пробел на карте на месте курсора
+
+#define MAPW (COLS-2)
+#define MAPH (LINES-2)
+#define MAPSIZE (MAPW * MAPH)
+
+#define random() (rand() % 100 / 100.0f)
+#define sign(x) (x < 0 ? -1 : 1)
+#define canmove(cell) (cell.type == EMPTY || cell.type == WATER) // Проверка клетки на то, что она нетвёрдая
+#define canmover(cell, x) (canmove(cell) && (x < MAPW-1)) // Проверка клетки на то, что она нетвёрдая, и проверка на границы справа
+#define canmovel(cell, x) (canmove(cell) && (x > 0)) // Проверка клетки на то, что она нетвёрдая, и проверка на границы слева
+#define watercanmove(cell) (cell.type == EMPTY) // Проверка на то, может ли в клетку перейти вода
+#define watercanmover(cell, x) (watercanmove(cell) && (x < MAPW-1)) // Проверка на то, может ли в клетку перейти вода, границы справа
+#define watercanmovel(cell, x) (watercanmove(cell) && (x > 0)) // Проверка на то, может ли в клетку перейти вода, границы слева
+// Меняет местами ячейки A и B в таблицах map и nmap
+#define cellswap(a, b)                  \
+        do {                            \
+            nmap[a] = map[b];           \
+            nmap[b] = map[a];           \
+            map[b] = EMPTY;             \
+        } while (0)
+
+#define swap(a, b, t)                   \
+        do {                            \
+            t = a;                      \
+            a = b;                      \
+            b = t;                      \
+        } while (0) 
+
+enum newcolors {
+    COLOR_GRAY = 100,
+    COLOR_DARKGRAY,
+    COLOR_BROWN,
+    COLOR_ORANGE,
+    COLOR_BLACK_2,
+};
+
+typedef enum {
+    EMPTY,
+    SAND,
+    WATER,
+    STONE,
+    WOOD,
+    ASH,
+    FIRE,
+    BOMB,
+} CellType; // Тип ячейки
+
+typedef struct {
+    CellType type;
+    bool skip_update; // Надо ли пропустить ячейку, когда её надо будет обновить
+    bool skip_render; // Балы ячейка уже выведена в терминал для пропуска во время отрисовки уже напечатаных ячеек
+    short timer; // Тайиер, нужен для задержки
+} Cell;
+
+typedef struct {
+    int x, y;
+    CellType brush;
+} Cursor;
+
+// Перетасовывает массив чисел
+void shuffle(int array[], size_t len) {
+    int t;
+    for (size_t i = len-1; i > 0; i--) {
+        size_t j = rand() % (i+1);
+        //size_t j = random() * (i+1);
+        swap(array[i], array[j], t);
+    }
+}
+
+// Поворачивает массив ARRAY с длиной LEN на N позиций вправо
+void rotate(int array[], size_t len, int n) {
+    if (n == 0) return;
+    n = n % len;
+
+    int t[n];
+    for (int i = 0; i < n; i++) {
+        t[i] = array[len-n + i];
+    }
+    for (int i = len-1; i >= n; i--) {
+        array[i] = array[i-n];
+    }
+    memcpy(array, t, n*sizeof(int));
+}
+
+void render(WINDOW *window, Cell *map, Cursor cursor, char *name) {
+    static char sprites[] = {
+        ' ',    // EMPTY
+        '#',    // SAND
+        '.',    // WATER
+        '@',    // STONE
+        '$',    // WOOD
+        '+',    // ASH
+        '^',    // FIRE
+        '&',    // BOMB
+    };
+    static char fire2 = '!';
+    
+    if (name != NULL) {
+        wmove(window, 0, 1);
+        waddstr(window, name);
+    }
+    
+    for (int y = 0; y < MAPH; y++) {
+        for (int x = 0; x < MAPW; x++) {
+            int current = y*MAPW + x;
+            if (map[current].skip_render) {
+                map[current].skip_render = false;
+                continue;
+            }
+            wmove(window, y+1, x+1);
+            if (x == 0 && y == 0) {
+                waddch(window, sprites[cursor.brush] | COLOR_PAIR(cursor.brush));
+                continue;
+            }
+            if (map[current].type == EMPTY && (x == cursor.x && y == cursor.y)) {
+                waddch(window, CURSOR_SPRITE | COLOR_PAIR(CURSOR_ID));
+            } else {
+                waddch(window, sprites[map[current].type] | A_PROTECT |
+                    ((x == cursor.x && y == cursor.y) ? COLOR_PAIR(CURSOR_ID) : COLOR_PAIR(map[current].type)));
+            }
+            if (map[current].type == FIRE) {
+                //int neighbors[8] = {current-MAPW-1, current-MAPW, current-MAPW+1, current-1, current+1, current+MAPW-1, current+MAPW, current+MAPW+1};
+                int neighbors_x[8] = {x-1, x, x+1, x-1, x+1, x-1, x, x+1};
+                int neighbors_y[8] = {y-1, y-1, y-1, y, y, y+1, y+1, y+1};
+                
+                for (int i = 0; i < 8; i++) {
+                    if (neighbors_x[i] >= 0 && neighbors_x[i] <= (MAPW-1) && neighbors_y[i] >= 0 && neighbors_y[i] <= (MAPH-1) && (rand() % 10 < 3)) {
+                        map[neighbors_y[i]*MAPW + neighbors_x[i]].skip_render = true;
+                        wmove(window, neighbors_y[i]+1, neighbors_x[i]+1);
+                        waddch(window, ((rand() % 2) ? sprites[FIRE] : fire2) | COLOR_PAIR((rand() % 2) ? FIRE : FIRE+50));
+                    }
+                }
+            }
+        }
+    }
+    wrefresh(window);
+}
+
+void update(Cell map[]) {
+    int order[MAPW]; // Массив с порядком обработки ячеек
+    for (int i = 0; i < MAPW; i++)
+        order[i] = i;
+    shuffle(order, MAPW); // Перемешивание массива, чтобы ячейки обрабатывались в случайном порядке
+    
+    for (int y = MAPH-1; y >= 0; y--) { // y - координата ячейки по Y
+        rotate(order, MAPW, random()*MAPW);
+        for (int i = 0; i < MAPW; i++) {
+            int x = order[i]; // Координата ячейки по x
+            int current = y*MAPW + x;
+            if (map[current].skip_update) {
+                map[current].skip_update = false;
+                continue;
+            }
+            int top = (y-1)*MAPW + x;
+            int bottom = (y+1)*MAPW + x;
+            Cell t;
+
+            int movements[8] = {0}; // Массив индексов клеток, куда можно переместиться
+            int j = 0;
+
+            switch (map[current].type) {
+            case EMPTY:
+            case WOOD:
+            case STONE:
+                break;
+            case ASH:
+            case SAND:
+                if (y == MAPH-1) {
+                    break;
+                }
+               if (canmove(map[bottom])) {
+                    swap(map[current], map[bottom], t);
+                } else if (canmovel(map[bottom - 1], x) && canmover(map[bottom + 1], x)) {
+                    int idx = bottom + (rand() % 2 ? 1 : -1);
+                    swap(map[current], map[idx], t);
+                    //swap(map[current], map[bottom + (rand() % 2 ? 1 : -1)], t);
+                } else if (canmovel(map[bottom - 1], x) && !canmover(map[bottom + 1], x)) {
+                    swap(map[current], map[bottom - 1], t);
+                } else if (!canmovel(map[bottom - 1], x) && canmover(map[bottom + 1], x)) {
+                    swap(map[current], map[bottom + 1], t);
+                }
+                break;
+            case WATER:
+                if (y < MAPH-1 && watercanmove(map[bottom])) {
+                    swap(map[current], map[bottom], t);
+                } else if (watercanmovel(map[current - 1], x) && watercanmover(map[current + 1], x) && (y == MAPH-1 || (!watercanmovel(map[bottom - 1], x) && !watercanmover(map[bottom + 1], x)))) {
+                    int idx = current + (rand() % 2 ? 1 : -1);
+                    swap(map[current], map[idx], t);
+                    //swap(map[current], map[current + (rand() % 2 ? 1 : -1)], t);
+                } else if (watercanmovel(map[current - 1], x) && !watercanmover(map[current + 1], x) && (y == MAPH-1 || (!watercanmovel(map[bottom - 1], x) && !watercanmover(map[bottom + 1], x)))) {
+                    swap(map[current], map[current - 1], t);
+                } else if (!watercanmovel(map[current - 1], x) && watercanmover(map[current + 1], x) && (y == MAPH-1 || (!watercanmovel(map[bottom - 1], x) && !watercanmover(map[bottom + 1], x)))) {
+                    swap(map[current], map[current + 1], t);
+                } else if (y < MAPH-1 && watercanmovel(map[bottom - 1], x) && watercanmover(map[bottom + 1], x)) {
+                    int idx = bottom + (rand() % 2 ? 1 : -1);
+                    swap(map[current], map[idx], t);
+                    //swap(map[current], map[bottom + (rand() % 2 ? 1 : -1)], t);
+                } else if (y < MAPH-1 && watercanmovel(map[bottom - 1], x) && !watercanmover(map[bottom + 1], x)) {
+                    swap(map[current], map[bottom - 1], t);
+                } else if (y < MAPH-1 && !watercanmovel(map[bottom - 1], x) && watercanmover(map[bottom + 1], x)) {
+                    swap(map[current], map[bottom + 1], t);
+                }
+                break;
+            case FIRE:
+                if (y > 0) {
+                    if (map[top].type == WATER) goto fireclear;
+                    else if (map[top].type == WOOD) movements[j++] = top;
+                    if (x > 0 && map[top - 1].type == WATER) goto fireclear;
+                    else if (x > 0 && map[top - 1].type == WOOD) movements[j++] = top-1;
+                    if (x < MAPW-1 && map[top + 1].type == WATER) goto fireclear;
+                    else if (x < MAPW-1 && map[top + 1].type == WOOD) movements[j++] = top+1;
+                }
+
+                if (x > 0 && map[current - 1].type == WATER) goto fireclear;
+                else if (x > 0 && map[current - 1].type == WOOD) movements[j++] = current-1;
+                if (x < MAPW-1 && map[current + 1].type == WATER) goto fireclear;
+                else if (x < MAPW-1 && map[current + 1].type == WOOD) movements[j++] = current+1;
+                
+                if (y < MAPH-1) {
+                    if (map[bottom].type == WATER) goto fireclear;
+                    else if (map[bottom].type == WOOD) movements[j++] = bottom;
+                    if (x > 0 && map[bottom - 1].type == WATER) goto fireclear;
+                    else if (x > 0 && map[bottom - 1].type == WOOD) movements[j++] = bottom - 1;
+                    if (x < MAPW-1 && map[bottom + 1].type == WATER) goto fireclear;
+                    else if (x < MAPW-1 && map[bottom + 1].type == WOOD) movements[j++] = bottom + 1;
+                }
+                if (j > 0) {
+                    float r = random();
+
+                    if (r > 0.15f)
+                        break;
+
+                    j *= random(); // Случайное сичло в диапазоне 0..j
+                    map[movements[j]].type = FIRE;
+                    if (movements[j] > bottom-1) // Пропуск обновления новой ячейки огня, если она будет ещё раз обрабатываться в цикле за этот кадр
+                        map[movements[j]].skip_update = true;
+                    if (r < 0.06f) {
+                        map[current].type = (r < 0.04f) ? ASH : FIRE;
+                    } else {
+                        map[current].type = EMPTY;
+                    }
+                } else {
+                    fireclear:
+                    map[current].type = EMPTY;
+                }
+                break;
+            case BOMB:
+                if (y > 0) {
+                    if (map[top].type == FIRE) goto boom;
+                    if (x > 0 && map[top - 1].type == FIRE) goto boom;
+                    if (x < MAPW-1 && map[top + 1].type == FIRE) goto boom;
+                }
+                if (x > 0 && map[current - 1].type == FIRE) goto boom;
+                if (x < MAPW-1 && map[current + 1].type == FIRE) goto boom;
+                if (y < MAPH-1) {
+                    if (map[bottom].type == FIRE) goto boom;
+                    if (x > 0 && map[bottom - 1].type == FIRE) goto boom;
+                    if (x < MAPW-1 && map[bottom + 1].type == FIRE) goto boom;
+                }
+                if (map[current].timer >= 50) {
+                    boom:
+                    for (int cy = y-3; cy <= y+3; cy++) {
+                        for (int cx = x-7; cx <= x+7; cx++) {
+                            if (cx >= 0 && cx <= (MAPW-1) && cy >= 0 && cy <= (MAPH-1)) {
+                                if (rand() % 6 == 0) continue;
+                                
+                                int ncurrent = cy*MAPW + cx;
+
+                                if (cx >= x-1 && cx <= x+1 && cy >= y-1 && cy <= y+1) {
+                                    map[ncurrent].type = EMPTY;
+                                } else if (cx >= x-4 && cx <= x+4 && cy >= y-2 && cy <= y+2) {
+                                    map[ncurrent].type = FIRE;
+                                } else if (map[ncurrent].type != EMPTY) {
+                                    int nx = cx + sign(cx-x) * (rand() % (abs(x-cx)+4));
+                                    int ny = cy + sign(cy-y) * (rand() % (abs(y-cy)+4));
+                                    if (nx >= 0 && nx <= (MAPW-1) && ny >= 0 && ny <= (MAPH-1)) {
+                                        int idx = (ny) * MAPW + (nx);
+                                        map[idx].type = map[ncurrent].type;
+                                        map[idx].timer = 0;
+                                        map[ncurrent].type = FIRE;
+                                    }
+                                }
+                                map[ncurrent].timer = 0;
+                                if (cy >= y)
+                                    map[ncurrent].skip_update = true;
+                            }
+                        }
+                    }
+                    map[current].type = EMPTY;
+                    map[current].timer = 0;
+                } else {
+                    map[current].timer++;
+                }
+                break;
+            }
+        }
+    }
+}
+
+int main(int argc, char *argv[]) {
+    char *prog = argv[0];
+    int target_tps = DEFAULT_TARGET_TPS;
+    if (argc > 1) {
+        target_tps = atoi(argv[1]);
+    }
+
+    if (!initscr()) {
+        fprintf(stderr, "%s: error initialising ncurses", prog);
+        return 1;
+    }
+    initscr();
+    noecho();
+    cbreak();
+    curs_set(2);
+    nodelay(stdscr, TRUE);
+    keypad(stdscr, TRUE);
+    mousemask(ALL_MOUSE_EVENTS | REPORT_MOUSE_POSITION, NULL);
+    mouseinterval(0);
+    //set_escdelay(25);
+    printf("\033[?1002h\n");
+    refresh();
+
+    WINDOW *win = newwin(LINES, COLS, 0, 0);
+    box(win, 0, 0);
+    wrefresh(win);
+    
+    start_color();
+    init_color(COLOR_GRAY, 550, 550, 550);
+    init_color(COLOR_DARKGRAY, 200, 200, 200);
+    init_color(COLOR_BROWN, 400, 200, 0);
+    init_color(COLOR_ORANGE, 1000, 500, 0);
+    init_color(COLOR_BLACK, 0, 0, 0);
+
+    init_pair(EMPTY, COLOR_WHITE, COLOR_BLACK);
+    init_pair(SAND, COLOR_WHITE, COLOR_YELLOW);
+    init_pair(WATER, COLOR_WHITE, COLOR_BLUE);
+    init_pair(STONE, COLOR_BLACK, COLOR_DARKGRAY);
+    init_pair(WOOD, COLOR_WHITE, COLOR_BROWN);
+    init_pair(ASH, COLOR_WHITE, COLOR_GRAY);
+    init_pair(FIRE, COLOR_WHITE, COLOR_RED);
+    init_pair(FIRE+50, COLOR_WHITE, COLOR_ORANGE);
+    init_pair(BOMB, COLOR_WHITE, COLOR_GREEN);
+    init_pair(CURSOR_ID, COLOR_BLACK, COLOR_WHITE);
+
+    wattron(win, COLOR_PAIR(EMPTY));
+
+    Cell map[MAPSIZE];
+    memset(map, EMPTY, sizeof(Cell) * MAPSIZE);
+    for (int y = 4; y < 14; y++) {
+        for (int x = 20; x < 100; x++) {
+            map[y*MAPW + x].type = STONE;
+        }
+    }
+    for (int i = 0; i < MAPSIZE; i++) {
+        if (rand() % 2)
+            map[i].type = EMPTY;
+        else
+            map[i].type = SAND;
+    }
+    
+
+    Cursor curs = {1, 0, .brush = SAND};
+
+    bool run = true;
+    bool button1 = false; // Нажата ли ЛКМ
+    bool button3 = false; // Нажато ли колёсико мыши
+    do {
+        clock_t start_clock = clock();
+
+        int c;
+        MEVENT event;
+        switch (c = getch()) {
+        case 'q':
+            run = false;
+            break;
+        case KEY_UP:
+            if (curs.y > 0)
+                curs.y--;
+            break;
+        case KEY_DOWN:
+            if (curs.y < (MAPH-1))
+                curs.y++;
+            break;
+        case KEY_RIGHT:
+            if (curs.x < (MAPW-1))
+                curs.x++;
+            break;
+        case KEY_LEFT:
+            if (curs.x > 0)
+                curs.x--;
+            break;
+        case KEY_MOUSE:
+            if (getmouse(&event) == OK) {
+                if (event.x > 0 && event.x < MAPW+1) curs.x = event.x-1;
+                if (event.y > 0 && event.y < MAPH+1) curs.y = event.y-1;
+
+                if (event.bstate == BUTTON1_PRESSED) {
+                    button1 = true;
+                } else if (event.bstate == BUTTON1_RELEASED) {
+                    button1 = false;
+                } else if (event.bstate == BUTTON2_PRESSED) {
+                    button3 = true;
+                } else if (event.bstate == BUTTON2_RELEASED) {
+                    button3 = false;
+                }
+            }
+            break;
+        case ' ':
+            map[curs.y*MAPW + curs.x].type = curs.brush;
+            break;
+        case 'c':
+            memset(map, EMPTY, sizeof(Cell) * MAPSIZE);
+            break;
+        default:
+            if (isdigit(c)) {
+                curs.brush = c - '0';
+            }
+            break;
+        }
+        if (button1) {
+            map[curs.y*MAPW + curs.x].type = curs.brush;
+        }
+        if (button3) {
+            map[curs.y*MAPW + curs.x].type = EMPTY;
+        }
+        update(map);
+        render(win, map, curs, NULL);
+
+        struct timespec delay = {0, (NS / target_tps) - ((clock()-start_clock) / (CLOCKS_PER_SEC * NS))};
+        if (target_tps == 1) {
+            delay.tv_nsec = 0;
+            delay.tv_sec = 1;
+        }
+        nanosleep(&delay, NULL);
+        
+    } while (run);
+
+    printf("\033[?1003l\n");
+    curs_set(1);
+    delwin(win);
+    endwin();
+
+    return 0;
+}
