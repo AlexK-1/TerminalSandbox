@@ -24,6 +24,7 @@
 #define watercanmove(cell) (cell.type == EMPTY) // Проверка на то, может ли в клетку перейти вода
 #define watercanmover(cell, x) (watercanmove(cell) && (x < MAPW-1)) // Проверка на то, может ли в клетку перейти вода, границы справа
 #define watercanmovel(cell, x) (watercanmove(cell) && (x > 0)) // Проверка на то, может ли в клетку перейти вода, границы слева
+
 // Меняет местами ячейки A и B в таблицах map и nmap
 #define cellswap(a, b)                  \
         do {                            \
@@ -59,6 +60,12 @@ typedef enum {
 } CellType; // Тип ячейки
 
 typedef struct {
+    const char *sprites; // Символы, которые соответствуют клтке
+    const char *name; // Название клетки
+    short *colors; // Цвета символов
+} CellInfo;
+
+typedef struct {
     CellType type;
     bool skip_update; // Надо ли пропустить ячейку, когда её надо будет обновить
     bool skip_render; // Балы ячейка уже выведена в терминал для пропуска во время отрисовки уже напечатаных ячеек
@@ -68,6 +75,7 @@ typedef struct {
 typedef struct {
     int x, y;
     CellType brush;
+    unsigned short brush_size;
 } Cursor;
 
 // Перетасовывает массив чисел
@@ -95,19 +103,7 @@ void rotate(int array[], size_t len, int n) {
     memcpy(array, t, n*sizeof(int));
 }
 
-void render(WINDOW *window, Cell *map, Cursor cursor, char *name) {
-    static char sprites[] = {
-        ' ',    // EMPTY
-        '#',    // SAND
-        '.',    // WATER
-        '@',    // STONE
-        '$',    // WOOD
-        '+',    // ASH
-        '^',    // FIRE
-        '&',    // BOMB
-    };
-    static char fire2 = '!';
-    
+void render(WINDOW *window, Cell *map, Cursor cursor, CellInfo cells_info[], char *name) {
     if (name != NULL) {
         wmove(window, 0, 1);
         waddstr(window, name);
@@ -121,15 +117,16 @@ void render(WINDOW *window, Cell *map, Cursor cursor, char *name) {
                 continue;
             }
             wmove(window, y+1, x+1);
-            if (x == 0 && y == 0) {
-                waddch(window, sprites[cursor.brush] | COLOR_PAIR(cursor.brush));
-                continue;
-            }
-            if (map[current].type == EMPTY && (x == cursor.x && y == cursor.y)) {
-                waddch(window, CURSOR_SPRITE | COLOR_PAIR(CURSOR_ID));
+            CellInfo current_cell_info = cells_info[map[current].type];
+            if (x >= cursor.x-cursor.brush_size+1 && x <= cursor.x+cursor.brush_size-1 && \
+                y >= cursor.y-(cursor.brush_size/2) && y <= cursor.y+(cursor.brush_size/2)) {
+                if (map[current].type == EMPTY) {
+                    waddch(window, CURSOR_SPRITE | COLOR_PAIR(CURSOR_ID));
+                } else {
+                    waddch(window, current_cell_info.sprites[0] | COLOR_PAIR(CURSOR_ID));
+                }
             } else {
-                waddch(window, sprites[map[current].type] | A_PROTECT |
-                    ((x == cursor.x && y == cursor.y) ? COLOR_PAIR(CURSOR_ID) : COLOR_PAIR(map[current].type)));
+                waddch(window, current_cell_info.sprites[0] | A_PROTECT | COLOR_PAIR(current_cell_info.colors[0]));
             }
             if (map[current].type == FIRE) {
                 //int neighbors[8] = {current-MAPW-1, current-MAPW, current-MAPW+1, current-1, current+1, current+MAPW-1, current+MAPW, current+MAPW+1};
@@ -140,12 +137,25 @@ void render(WINDOW *window, Cell *map, Cursor cursor, char *name) {
                     if (neighbors_x[i] >= 0 && neighbors_x[i] <= (MAPW-1) && neighbors_y[i] >= 0 && neighbors_y[i] <= (MAPH-1) && (rand() % 10 < 3)) {
                         map[neighbors_y[i]*MAPW + neighbors_x[i]].skip_render = true;
                         wmove(window, neighbors_y[i]+1, neighbors_x[i]+1);
-                        waddch(window, ((rand() % 2) ? sprites[FIRE] : fire2) | COLOR_PAIR((rand() % 2) ? FIRE : FIRE+50));
+                        waddch(window, cells_info[FIRE].sprites[rand() % 2] | COLOR_PAIR(cells_info[FIRE].colors[rand() % 2]));
                     }
                 }
             }
         }
     }
+    CellInfo brush_info = cells_info[cursor.brush];
+
+    wmove(window, 1, 1);
+    waddch(window, brush_info.sprites[0] | COLOR_PAIR(brush_info.colors[0]));
+
+    wmove(window, 1, 3);
+    char brushsize_str[3];
+    sprintf(brushsize_str, "%d", (cursor.brush_size <= 99 ? cursor.brush_size : 99));
+    waddstr(window, brushsize_str);
+
+    wmove(window, 1, 6);
+    waddstr(window, brush_info.name);
+
     wrefresh(window);
 }
 
@@ -156,7 +166,7 @@ void update(Cell map[]) {
     shuffle(order, MAPW); // Перемешивание массива, чтобы ячейки обрабатывались в случайном порядке
     
     for (int y = MAPH-1; y >= 0; y--) { // y - координата ячейки по Y
-        rotate(order, MAPW, random()*MAPW);
+        rotate(order, MAPW, rand() % MAPW);
         for (int i = 0; i < MAPW; i++) {
             int x = order[i]; // Координата ячейки по x
             int current = y*MAPW + x;
@@ -324,12 +334,11 @@ int main(int argc, char *argv[]) {
     initscr();
     noecho();
     cbreak();
-    curs_set(2);
+    curs_set(0);
     nodelay(stdscr, TRUE);
     keypad(stdscr, TRUE);
     mousemask(ALL_MOUSE_EVENTS | REPORT_MOUSE_POSITION, NULL);
     mouseinterval(0);
-    //set_escdelay(25);
     printf("\033[?1002h\n");
     refresh();
 
@@ -351,9 +360,20 @@ int main(int argc, char *argv[]) {
     init_pair(WOOD, COLOR_WHITE, COLOR_BROWN);
     init_pair(ASH, COLOR_WHITE, COLOR_GRAY);
     init_pair(FIRE, COLOR_WHITE, COLOR_RED);
-    init_pair(FIRE+50, COLOR_WHITE, COLOR_ORANGE);
+    init_pair(FIRE+10, COLOR_WHITE, COLOR_ORANGE);
     init_pair(BOMB, COLOR_WHITE, COLOR_GREEN);
     init_pair(CURSOR_ID, COLOR_BLACK, COLOR_WHITE);
+
+    CellInfo cells_info[] = {
+        {" ", "Empty", (short[]){EMPTY}},
+        {"#", "Sand", (short []){SAND}},
+        {".", "Water", (short []){WATER}},
+        {"@", "Stone", (short []){STONE}},
+        {"$", "Wood", (short []){WOOD}},
+        {"+", "Ash", (short []){ASH}},
+        {"^!", "Fire", (short []){FIRE, FIRE+10}},
+        {"&", "Bomb", (short []){BOMB}},
+    };
 
     wattron(win, COLOR_PAIR(EMPTY));
 
@@ -372,7 +392,7 @@ int main(int argc, char *argv[]) {
     }
     
 
-    Cursor curs = {1, 0, .brush = SAND};
+    Cursor curs = {0, 2, .brush = SAND, .brush_size=1};
 
     bool run = true;
     bool button1 = false; // Нажата ли ЛКМ
@@ -415,6 +435,10 @@ int main(int argc, char *argv[]) {
                     button3 = true;
                 } else if (event.bstate == BUTTON2_RELEASED) {
                     button3 = false;
+                } else if (event.bstate == BUTTON4_PRESSED) {
+                    if (curs.brush_size < 99) curs.brush_size++;
+                }else if (event.bstate == BUTTON5_PRESSED) {
+                    if (curs.brush_size > 1) curs.brush_size--;
                 }
             }
             break;
@@ -424,20 +448,32 @@ int main(int argc, char *argv[]) {
         case 'c':
             memset(map, EMPTY, sizeof(Cell) * MAPSIZE);
             break;
+        case '+':
+            if (curs.brush_size < 99) curs.brush_size++;
+            break;
+        case '-':
+            if (curs.brush_size > 1) curs.brush_size--;
+            break;
         default:
             if (isdigit(c)) {
                 curs.brush = c - '0';
             }
             break;
         }
-        if (button1) {
-            map[curs.y*MAPW + curs.x].type = curs.brush;
-        }
-        if (button3) {
-            map[curs.y*MAPW + curs.x].type = EMPTY;
+        if (button1 || button3) {
+            int y = curs.y-(curs.brush_size/2);
+            if (y < 0) y = 0;
+
+            for (; y <= curs.y+(curs.brush_size/2); y++) {
+                int x = curs.x-curs.brush_size+1;
+                if (x < 0) x = 0;
+                for (; x <= curs.x+curs.brush_size-1; x++) {
+                    map[y*MAPW + x].type = (button1 ? curs.brush : EMPTY);
+                }
+            }
         }
         update(map);
-        render(win, map, curs, NULL);
+        render(win, map, curs, cells_info, NULL);
 
         struct timespec delay = {0, (NS / target_tps) - ((clock()-start_clock) / (CLOCKS_PER_SEC * NS))};
         if (target_tps == 1) {
