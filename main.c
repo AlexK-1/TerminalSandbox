@@ -5,7 +5,7 @@
 #include <stdbool.h>
 #include <ctype.h>
 #include <ncurses.h>
-//#include <curses.h>
+#include <threads.h>
 
 #define NS 1000000000 // Количество наносекунд в секунде
 #define DEFAULT_TARGET_TPS 30
@@ -103,12 +103,17 @@ void rotate(int array[], size_t len, int n) {
     memcpy(array, t, n*sizeof(int));
 }
 
+mtx_t map_mtx;
+mtx_t curs_mtx;
+
 void render(WINDOW *window, Cell *map, Cursor cursor, CellInfo cells_info[], char *name) {
     if (name != NULL) {
         wmove(window, 0, 1);
         waddstr(window, name);
     }
     
+    mtx_lock(&map_mtx);
+    mtx_lock(&curs_mtx);
     for (int y = 0; y < MAPH; y++) {
         for (int x = 0; x < MAPW; x++) {
             int current = y*MAPW + x;
@@ -127,22 +132,25 @@ void render(WINDOW *window, Cell *map, Cursor cursor, CellInfo cells_info[], cha
                 }
             } else {
                 waddch(window, current_cell_info.sprites[0] | A_PROTECT | COLOR_PAIR(current_cell_info.colors[0]));
-            }
-            if (map[current].type == FIRE) {
-                //int neighbors[8] = {current-MAPW-1, current-MAPW, current-MAPW+1, current-1, current+1, current+MAPW-1, current+MAPW, current+MAPW+1};
-                int neighbors_x[8] = {x-1, x, x+1, x-1, x+1, x-1, x, x+1};
-                int neighbors_y[8] = {y-1, y-1, y-1, y, y, y+1, y+1, y+1};
-                
-                for (int i = 0; i < 8; i++) {
-                    if (neighbors_x[i] >= 0 && neighbors_x[i] <= (MAPW-1) && neighbors_y[i] >= 0 && neighbors_y[i] <= (MAPH-1) && (rand() % 10 < 3)) {
-                        map[neighbors_y[i]*MAPW + neighbors_x[i]].skip_render = true;
-                        wmove(window, neighbors_y[i]+1, neighbors_x[i]+1);
-                        waddch(window, cells_info[FIRE].sprites[rand() % 2] | COLOR_PAIR(cells_info[FIRE].colors[rand() % 2]));
+
+                if (map[current].type == FIRE) {
+                    //int neighbors[8] = {current-MAPW-1, current-MAPW, current-MAPW+1, current-1, current+1, current+MAPW-1, current+MAPW, current+MAPW+1};
+                    int neighbors_x[8] = {x-1, x, x+1, x-1, x+1, x-1, x, x+1};
+                    int neighbors_y[8] = {y-1, y-1, y-1, y, y, y+1, y+1, y+1};
+                    
+                    for (int i = 0; i < 8; i++) {
+                        if (neighbors_x[i] >= 0 && neighbors_x[i] <= (MAPW-1) && neighbors_y[i] >= 0 && neighbors_y[i] <= (MAPH-1) && (rand() % 10 < 3)) {
+                            map[neighbors_y[i]*MAPW + neighbors_x[i]].skip_render = true;
+                            wmove(window, neighbors_y[i]+1, neighbors_x[i]+1);
+                            waddch(window, cells_info[FIRE].sprites[rand() % 2] | COLOR_PAIR(cells_info[FIRE].colors[rand() % 2]));
+                        }
                     }
                 }
             }
         }
     }
+    mtx_unlock(&map_mtx);
+
     CellInfo brush_info = cells_info[cursor.brush];
 
     wmove(window, 1, 1);
@@ -151,6 +159,7 @@ void render(WINDOW *window, Cell *map, Cursor cursor, CellInfo cells_info[], cha
     wmove(window, 1, 3);
     char brushsize_str[3];
     sprintf(brushsize_str, "%d", (cursor.brush_size <= 99 ? cursor.brush_size : 99));
+    mtx_unlock(&curs_mtx);
     waddstr(window, brushsize_str);
 
     wmove(window, 1, 6);
@@ -165,6 +174,8 @@ void update(Cell map[]) {
         order[i] = i;
     shuffle(order, MAPW); // Перемешивание массива, чтобы ячейки обрабатывались в случайном порядке
     
+    mtx_lock(&map_mtx);
+
     for (int y = MAPH-1; y >= 0; y--) { // y - координата ячейки по Y
         rotate(order, MAPW, rand() % MAPW);
         for (int i = 0; i < MAPW; i++) {
@@ -318,6 +329,132 @@ void update(Cell map[]) {
             }
         }
     }
+
+    mtx_unlock(&map_mtx);
+}
+
+typedef struct {
+    Cursor *cr; // Указатель на структуру курсора
+    Cell *mp; // Указатель на массив ячеек
+} InputThreadArgs;
+
+bool run = true;
+
+// Функция обработки ввода в отдельном потоке
+int input_thread_loop(void *args) {
+    Cursor *curs = ((InputThreadArgs *)args)->cr;
+    Cell *map = ((InputThreadArgs *)args)->mp;
+
+    bool button1 = false; // Нажата ли ЛКМ
+    bool button3 = false; // Нажато ли колёсико мыши
+
+    do {
+        int c;
+        MEVENT event;
+        switch (c = getch()) {
+        case 'q':
+            run = false;
+            break;
+        case KEY_UP:
+            if (curs->y > 0) {
+                mtx_lock(&curs_mtx);
+                curs->y--;
+                mtx_unlock(&curs_mtx);
+            }
+            break;
+        case KEY_DOWN:
+            if (curs->y < (MAPH-1)) {
+                mtx_lock(&curs_mtx);
+                curs->y++;
+                mtx_unlock(&curs_mtx);
+            }
+            break;
+        case KEY_RIGHT:
+            if (curs->x < (MAPW-1)) {
+                mtx_lock(&curs_mtx);
+                curs->x++;
+                mtx_unlock(&curs_mtx);
+            }
+            break;
+        case KEY_LEFT:
+            if (curs->x > 0) {
+                mtx_lock(&curs_mtx);
+                curs->x--;
+                mtx_unlock(&curs_mtx);
+            }
+            break;
+        case KEY_MOUSE:
+            if (getmouse(&event) == OK) {
+                mtx_lock(&curs_mtx);
+                if (event.x > 0 && event.x < MAPW+1) curs->x = event.x-1;
+                if (event.y > 0 && event.y < MAPH+1) curs->y = event.y-1;
+
+                if (event.bstate == BUTTON1_PRESSED) {
+                    button1 = true;
+                } else if (event.bstate == BUTTON1_RELEASED) {
+                    button1 = false;
+                } else if (event.bstate == BUTTON2_PRESSED) {
+                    button3 = true;
+                } else if (event.bstate == BUTTON2_RELEASED) {
+                    button3 = false;
+                } else if (event.bstate == BUTTON4_PRESSED) {
+                    if (curs->brush_size < 99) curs->brush_size++;
+                } else if (event.bstate == BUTTON5_PRESSED) {
+                    if (curs->brush_size > 1) curs->brush_size--;
+                }
+                mtx_unlock(&curs_mtx);
+            }
+            break;
+        case ' ':
+            mtx_lock(&map_mtx);
+            map[curs->y*MAPW + curs->x].type = curs->brush;
+            mtx_unlock(&map_mtx);
+            break;
+        case 'c':
+            mtx_lock(&map_mtx);
+            memset(map, EMPTY, sizeof(Cell) * MAPSIZE);
+            mtx_unlock(&map_mtx);
+            break;
+        case '+':
+            if (curs->brush_size < 99) {
+                mtx_lock(&curs_mtx);
+                curs->brush_size++;
+                mtx_unlock(&curs_mtx);
+            }
+            break;
+        case '-':
+            if (curs->brush_size > 1) {
+                mtx_lock(&curs_mtx);
+                curs->brush_size--;
+                mtx_unlock(&curs_mtx);
+            }
+            break;
+        default:
+            if (isdigit(c)) {
+                mtx_lock(&curs_mtx);
+                curs->brush = c - '0';
+                mtx_unlock(&curs_mtx);
+            }
+            break;
+        }
+        if (button1 || button3) {
+            int y = curs->y-(curs->brush_size/2);
+            if (y < 0) y = 0;
+
+            mtx_lock(&map_mtx);
+            for (; y <= curs->y+(curs->brush_size/2) && y <= (MAPH-1); y++) {
+                int x = curs->x-curs->brush_size+1;
+                if (x < 0) x = 0;
+                for (; x <= curs->x+curs->brush_size-1 && x <= (MAPW-1); x++) {
+                    map[y*MAPW + x].type = (button1 ? curs->brush : EMPTY);
+                }
+            }
+            mtx_unlock(&map_mtx);
+        }
+        
+    } while (run);
+
+    return 0;
 }
 
 int main(int argc, char *argv[]) {
@@ -394,84 +531,16 @@ int main(int argc, char *argv[]) {
 
     Cursor curs = {0, 2, .brush = SAND, .brush_size=1};
 
-    bool run = true;
-    bool button1 = false; // Нажата ли ЛКМ
-    bool button3 = false; // Нажато ли колёсико мыши
+    mtx_init(&curs_mtx, mtx_plain);
+    mtx_init(&map_mtx, mtx_plain);
+
+    InputThreadArgs input_thrd_args = {.cr = &curs, .mp = map};
+    thrd_t input_thrd;
+    thrd_create(&input_thrd, input_thread_loop, &input_thrd_args);
+
     do {
         clock_t start_clock = clock();
 
-        int c;
-        MEVENT event;
-        switch (c = getch()) {
-        case 'q':
-            run = false;
-            break;
-        case KEY_UP:
-            if (curs.y > 0)
-                curs.y--;
-            break;
-        case KEY_DOWN:
-            if (curs.y < (MAPH-1))
-                curs.y++;
-            break;
-        case KEY_RIGHT:
-            if (curs.x < (MAPW-1))
-                curs.x++;
-            break;
-        case KEY_LEFT:
-            if (curs.x > 0)
-                curs.x--;
-            break;
-        case KEY_MOUSE:
-            if (getmouse(&event) == OK) {
-                if (event.x > 0 && event.x < MAPW+1) curs.x = event.x-1;
-                if (event.y > 0 && event.y < MAPH+1) curs.y = event.y-1;
-
-                if (event.bstate == BUTTON1_PRESSED) {
-                    button1 = true;
-                } else if (event.bstate == BUTTON1_RELEASED) {
-                    button1 = false;
-                } else if (event.bstate == BUTTON2_PRESSED) {
-                    button3 = true;
-                } else if (event.bstate == BUTTON2_RELEASED) {
-                    button3 = false;
-                } else if (event.bstate == BUTTON4_PRESSED) {
-                    if (curs.brush_size < 99) curs.brush_size++;
-                }else if (event.bstate == BUTTON5_PRESSED) {
-                    if (curs.brush_size > 1) curs.brush_size--;
-                }
-            }
-            break;
-        case ' ':
-            map[curs.y*MAPW + curs.x].type = curs.brush;
-            break;
-        case 'c':
-            memset(map, EMPTY, sizeof(Cell) * MAPSIZE);
-            break;
-        case '+':
-            if (curs.brush_size < 99) curs.brush_size++;
-            break;
-        case '-':
-            if (curs.brush_size > 1) curs.brush_size--;
-            break;
-        default:
-            if (isdigit(c)) {
-                curs.brush = c - '0';
-            }
-            break;
-        }
-        if (button1 || button3) {
-            int y = curs.y-(curs.brush_size/2);
-            if (y < 0) y = 0;
-
-            for (; y <= curs.y+(curs.brush_size/2); y++) {
-                int x = curs.x-curs.brush_size+1;
-                if (x < 0) x = 0;
-                for (; x <= curs.x+curs.brush_size-1; x++) {
-                    map[y*MAPW + x].type = (button1 ? curs.brush : EMPTY);
-                }
-            }
-        }
         update(map);
         render(win, map, curs, cells_info, NULL);
 
