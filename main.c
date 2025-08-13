@@ -12,18 +12,17 @@
 #define CURSOR_ID 10 // Номер цветовой пары для курсора
 #define CURSOR_SPRITE '*' // Символ курсора, если будет пробел на карте на месте курсора
 
-#define MAPW (COLS-2)
-#define MAPH (LINES-2)
-#define MAPSIZE (MAPW * MAPH)
+#define MAPW (COLS-2) // Ширина поля с ячейками на основе размера терминала
+#define MAPH (LINES-2) // Высота поля с ячейками на основе размера терминала
 
 #define random() (rand() % 100 / 100.0f)
 #define sign(x) (x < 0 ? -1 : 1)
-#define canmove(cell) (cell.type == EMPTY || cell.type == WATER) // Проверка клетки на то, что она нетвёрдая
-#define canmover(cell, x) (canmove(cell) && (x < MAPW-1)) // Проверка клетки на то, что она нетвёрдая, и проверка на границы справа
-#define canmovel(cell, x) (canmove(cell) && (x > 0)) // Проверка клетки на то, что она нетвёрдая, и проверка на границы слева
-#define watercanmove(cell) (cell.type == EMPTY) // Проверка на то, может ли в клетку перейти вода
-#define watercanmover(cell, x) (watercanmove(cell) && (x < MAPW-1)) // Проверка на то, может ли в клетку перейти вода, границы справа
-#define watercanmovel(cell, x) (watercanmove(cell) && (x > 0)) // Проверка на то, может ли в клетку перейти вода, границы слева
+#define canmove(cellidx) (map.cells[cellidx].type == EMPTY || map.cells[cellidx].type == WATER) // Проверка клетки на то, что она нетвёрдая
+#define canmover(cellidx, x) (canmove(cellidx) && (x < map.width-1)) // Проверка клетки на то, что она нетвёрдая, и проверка на границы справа
+#define canmovel(cellidx, x) (canmove(cellidx) && (x > 0)) // Проверка клетки на то, что она нетвёрдая, и проверка на границы слева
+#define watercanmove(cellidx) (map.cells[cellidx].type == EMPTY) // Проверка на то, может ли в клетку перейти вода
+#define watercanmover(cellidx, x) (watercanmove(cellidx) && (x < map.width-1)) // Проверка на то, может ли в клетку перейти вода, границы справа
+#define watercanmovel(cellidx, x) (watercanmove(cellidx) && (x > 0)) // Проверка на то, может ли в клетку перейти вода, границы слева
 
 // Меняет местами ячейки A и B в таблицах map и nmap
 #define cellswap(a, b)                  \
@@ -73,6 +72,11 @@ typedef struct {
 } Cell;
 
 typedef struct {
+    Cell *cells;
+    unsigned short width, height;
+} CellsMap;
+
+typedef struct {
     int x, y;
     CellType brush;
     unsigned short brush_size;
@@ -106,7 +110,7 @@ void rotate(int array[], size_t len, int n) {
 mtx_t map_mtx;
 mtx_t curs_mtx;
 
-void render(WINDOW *window, Cell *map, Cursor cursor, CellInfo cells_info[], char *name) {
+void render(WINDOW *window, CellsMap map, Cursor cursor, CellInfo cells_info[], char *name) {
     if (name != NULL) {
         wmove(window, 0, 1);
         waddstr(window, name);
@@ -114,18 +118,18 @@ void render(WINDOW *window, Cell *map, Cursor cursor, CellInfo cells_info[], cha
     
     mtx_lock(&map_mtx);
     mtx_lock(&curs_mtx);
-    for (int y = 0; y < MAPH; y++) {
-        for (int x = 0; x < MAPW; x++) {
-            int current = y*MAPW + x;
-            if (map[current].skip_render) {
-                map[current].skip_render = false;
+    for (int y = 0; y < map.height; y++) {
+        for (int x = 0; x < map.width; x++) {
+            int current = y*map.width + x;
+            if (map.cells[current].skip_render) {
+                map.cells[current].skip_render = false;
                 continue;
             }
             wmove(window, y+1, x+1);
-            CellInfo current_cell_info = cells_info[map[current].type];
+            CellInfo current_cell_info = cells_info[map.cells[current].type];
             if (x >= cursor.x-cursor.brush_size+1 && x <= cursor.x+cursor.brush_size-1 && \
                 y >= cursor.y-(cursor.brush_size/2) && y <= cursor.y+(cursor.brush_size/2)) {
-                if (map[current].type == EMPTY) {
+                if (map.cells[current].type == EMPTY) {
                     waddch(window, CURSOR_SPRITE | COLOR_PAIR(CURSOR_ID));
                 } else {
                     waddch(window, current_cell_info.sprites[0] | COLOR_PAIR(CURSOR_ID));
@@ -133,14 +137,14 @@ void render(WINDOW *window, Cell *map, Cursor cursor, CellInfo cells_info[], cha
             } else {
                 waddch(window, current_cell_info.sprites[0] | A_PROTECT | COLOR_PAIR(current_cell_info.colors[0]));
 
-                if (map[current].type == FIRE) {
-                    //int neighbors[8] = {current-MAPW-1, current-MAPW, current-MAPW+1, current-1, current+1, current+MAPW-1, current+MAPW, current+MAPW+1};
+                if (map.cells[current].type == FIRE) {
+                    //int neighbors[8] = {current-map.width-1, current-map.width, current-map.width+1, current-1, current+1, current+map.width-1, current+map.width, current+map.width+1};
                     int neighbors_x[8] = {x-1, x, x+1, x-1, x+1, x-1, x, x+1};
                     int neighbors_y[8] = {y-1, y-1, y-1, y, y, y+1, y+1, y+1};
                     
                     for (int i = 0; i < 8; i++) {
-                        if (neighbors_x[i] >= 0 && neighbors_x[i] <= (MAPW-1) && neighbors_y[i] >= 0 && neighbors_y[i] <= (MAPH-1) && (rand() % 10 < 3)) {
-                            map[neighbors_y[i]*MAPW + neighbors_x[i]].skip_render = true;
+                        if (neighbors_x[i] >= 0 && neighbors_x[i] <= (map.width-1) && neighbors_y[i] >= 0 && neighbors_y[i] <= (map.height-1) && (rand() % 10 < 3)) {
+                            map.cells[neighbors_y[i]*map.width + neighbors_x[i]].skip_render = true;
                             wmove(window, neighbors_y[i]+1, neighbors_x[i]+1);
                             waddch(window, cells_info[FIRE].sprites[rand() % 2] | COLOR_PAIR(cells_info[FIRE].colors[rand() % 2]));
                         }
@@ -156,10 +160,10 @@ void render(WINDOW *window, Cell *map, Cursor cursor, CellInfo cells_info[], cha
     wmove(window, 1, 1);
     waddch(window, brush_info.sprites[0] | COLOR_PAIR(brush_info.colors[0]));
 
-    wmove(window, 1, 3);
     char brushsize_str[3];
     sprintf(brushsize_str, "%d", (cursor.brush_size <= 99 ? cursor.brush_size : 99));
     mtx_unlock(&curs_mtx);
+    wmove(window, 1, 3);
     waddstr(window, brushsize_str);
 
     wmove(window, 1, 6);
@@ -168,95 +172,95 @@ void render(WINDOW *window, Cell *map, Cursor cursor, CellInfo cells_info[], cha
     wrefresh(window);
 }
 
-void update(Cell map[]) {
-    int order[MAPW]; // Массив с порядком обработки ячеек
-    for (int i = 0; i < MAPW; i++)
+void update(CellsMap map) {
+    int order[map.width]; // Массив с порядком обработки ячеек
+    for (int i = 0; i < map.width; i++)
         order[i] = i;
-    shuffle(order, MAPW); // Перемешивание массива, чтобы ячейки обрабатывались в случайном порядке
+    shuffle(order, map.width); // Перемешивание массива, чтобы ячейки обрабатывались в случайном порядке
     
     mtx_lock(&map_mtx);
 
-    for (int y = MAPH-1; y >= 0; y--) { // y - координата ячейки по Y
-        rotate(order, MAPW, rand() % MAPW);
-        for (int i = 0; i < MAPW; i++) {
+    for (int y = map.height-1; y >= 0; y--) { // y - координата ячейки по Y
+        rotate(order, map.width, rand() % map.width);
+        for (int i = 0; i < map.width; i++) {
             int x = order[i]; // Координата ячейки по x
-            int current = y*MAPW + x;
-            if (map[current].skip_update) {
-                map[current].skip_update = false;
+            int current = y*map.width + x;
+            if (map.cells[current].skip_update) {
+                map.cells[current].skip_update = false;
                 continue;
             }
-            int top = (y-1)*MAPW + x;
-            int bottom = (y+1)*MAPW + x;
+            int top = (y-1)*map.width + x;
+            int bottom = (y+1)*map.width + x;
             Cell t;
 
             int movements[8] = {0}; // Массив индексов клеток, куда можно переместиться
             int j = 0;
 
-            switch (map[current].type) {
+            switch (map.cells[current].type) {
             case EMPTY:
             case WOOD:
             case STONE:
                 break;
             case ASH:
             case SAND:
-                if (y == MAPH-1) {
+                if (y == map.height-1) {
                     break;
                 }
-               if (canmove(map[bottom])) {
-                    swap(map[current], map[bottom], t);
-                } else if (canmovel(map[bottom - 1], x) && canmover(map[bottom + 1], x)) {
+               if (canmove(bottom)) {
+                    swap(map.cells[current], map.cells[bottom], t);
+                } else if (canmovel(bottom - 1, x) && canmover(bottom + 1, x)) {
                     int idx = bottom + (rand() % 2 ? 1 : -1);
-                    swap(map[current], map[idx], t);
+                    swap(map.cells[current], map.cells[idx], t);
                     //swap(map[current], map[bottom + (rand() % 2 ? 1 : -1)], t);
-                } else if (canmovel(map[bottom - 1], x) && !canmover(map[bottom + 1], x)) {
-                    swap(map[current], map[bottom - 1], t);
-                } else if (!canmovel(map[bottom - 1], x) && canmover(map[bottom + 1], x)) {
-                    swap(map[current], map[bottom + 1], t);
+                } else if (canmovel(bottom - 1, x) && !canmover(bottom + 1, x)) {
+                    swap(map.cells[current], map.cells[bottom - 1], t);
+                } else if (!canmovel(bottom - 1, x) && canmover(bottom + 1, x)) {
+                    swap(map.cells[current], map.cells[bottom + 1], t);
                 }
                 break;
             case WATER:
-                if (y < MAPH-1 && watercanmove(map[bottom])) {
-                    swap(map[current], map[bottom], t);
-                } else if (watercanmovel(map[current - 1], x) && watercanmover(map[current + 1], x) && (y == MAPH-1 || (!watercanmovel(map[bottom - 1], x) && !watercanmover(map[bottom + 1], x)))) {
+                if (y < map.height-1 && watercanmove(bottom)) {
+                    swap(map.cells[current], map.cells[bottom], t);
+                } else if (watercanmovel(current - 1, x) && watercanmover(current + 1, x) && (y == map.height-1 || (!watercanmovel(bottom - 1, x) && !watercanmover(bottom + 1, x)))) {
                     int idx = current + (rand() % 2 ? 1 : -1);
-                    swap(map[current], map[idx], t);
-                    //swap(map[current], map[current + (rand() % 2 ? 1 : -1)], t);
-                } else if (watercanmovel(map[current - 1], x) && !watercanmover(map[current + 1], x) && (y == MAPH-1 || (!watercanmovel(map[bottom - 1], x) && !watercanmover(map[bottom + 1], x)))) {
-                    swap(map[current], map[current - 1], t);
-                } else if (!watercanmovel(map[current - 1], x) && watercanmover(map[current + 1], x) && (y == MAPH-1 || (!watercanmovel(map[bottom - 1], x) && !watercanmover(map[bottom + 1], x)))) {
-                    swap(map[current], map[current + 1], t);
-                } else if (y < MAPH-1 && watercanmovel(map[bottom - 1], x) && watercanmover(map[bottom + 1], x)) {
+                    swap(map.cells[current], map.cells[idx], t);
+                    //swap(map.cells[current], map.cells[current + (rand() % 2 ? 1 : -1)], t);
+                } else if (watercanmovel(current - 1, x) && !watercanmover(current + 1, x) && (y == map.height-1 || (!watercanmovel(bottom - 1, x) && !watercanmover(bottom + 1, x)))) {
+                    swap(map.cells[current], map.cells[current - 1], t);
+                } else if (!watercanmovel(current - 1, x) && watercanmover(current + 1, x) && (y == map.height-1 || (!watercanmovel(bottom - 1, x) && !watercanmover(bottom + 1, x)))) {
+                    swap(map.cells[current], map.cells[current + 1], t);
+                } else if (y < map.height-1 && watercanmovel(bottom - 1, x) && watercanmover(bottom + 1, x)) {
                     int idx = bottom + (rand() % 2 ? 1 : -1);
-                    swap(map[current], map[idx], t);
-                    //swap(map[current], map[bottom + (rand() % 2 ? 1 : -1)], t);
-                } else if (y < MAPH-1 && watercanmovel(map[bottom - 1], x) && !watercanmover(map[bottom + 1], x)) {
-                    swap(map[current], map[bottom - 1], t);
-                } else if (y < MAPH-1 && !watercanmovel(map[bottom - 1], x) && watercanmover(map[bottom + 1], x)) {
-                    swap(map[current], map[bottom + 1], t);
+                    swap(map.cells[current], map.cells[idx], t);
+                    //swap(map.cells[current], map.cells[bottom + (rand() % 2 ? 1 : -1)], t);
+                } else if (y < map.height-1 && watercanmovel(bottom - 1, x) && !watercanmover(bottom + 1, x)) {
+                    swap(map.cells[current], map.cells[bottom - 1], t);
+                } else if (y < map.height-1 && !watercanmovel(bottom - 1, x) && watercanmover(bottom + 1, x)) {
+                    swap(map.cells[current], map.cells[bottom + 1], t);
                 }
                 break;
             case FIRE:
                 if (y > 0) {
-                    if (map[top].type == WATER) goto fireclear;
-                    else if (map[top].type == WOOD) movements[j++] = top;
-                    if (x > 0 && map[top - 1].type == WATER) goto fireclear;
-                    else if (x > 0 && map[top - 1].type == WOOD) movements[j++] = top-1;
-                    if (x < MAPW-1 && map[top + 1].type == WATER) goto fireclear;
-                    else if (x < MAPW-1 && map[top + 1].type == WOOD) movements[j++] = top+1;
+                    if (map.cells[top].type == WATER) goto fireclear;
+                    else if (map.cells[top].type == WOOD) movements[j++] = top;
+                    if (x > 0 && map.cells[top - 1].type == WATER) goto fireclear;
+                    else if (x > 0 && map.cells[top - 1].type == WOOD) movements[j++] = top-1;
+                    if (x < map.width-1 && map.cells[top + 1].type == WATER) goto fireclear;
+                    else if (x < map.width-1 && map.cells[top + 1].type == WOOD) movements[j++] = top+1;
                 }
 
-                if (x > 0 && map[current - 1].type == WATER) goto fireclear;
-                else if (x > 0 && map[current - 1].type == WOOD) movements[j++] = current-1;
-                if (x < MAPW-1 && map[current + 1].type == WATER) goto fireclear;
-                else if (x < MAPW-1 && map[current + 1].type == WOOD) movements[j++] = current+1;
+                if (x > 0 && map.cells[current - 1].type == WATER) goto fireclear;
+                else if (x > 0 && map.cells[current - 1].type == WOOD) movements[j++] = current-1;
+                if (x < map.width-1 && map.cells[current + 1].type == WATER) goto fireclear;
+                else if (x < map.width-1 && map.cells[current + 1].type == WOOD) movements[j++] = current+1;
                 
-                if (y < MAPH-1) {
-                    if (map[bottom].type == WATER) goto fireclear;
-                    else if (map[bottom].type == WOOD) movements[j++] = bottom;
-                    if (x > 0 && map[bottom - 1].type == WATER) goto fireclear;
-                    else if (x > 0 && map[bottom - 1].type == WOOD) movements[j++] = bottom - 1;
-                    if (x < MAPW-1 && map[bottom + 1].type == WATER) goto fireclear;
-                    else if (x < MAPW-1 && map[bottom + 1].type == WOOD) movements[j++] = bottom + 1;
+                if (y < map.height-1) {
+                    if (map.cells[bottom].type == WATER) goto fireclear;
+                    else if (map.cells[bottom].type == WOOD) movements[j++] = bottom;
+                    if (x > 0 && map.cells[bottom - 1].type == WATER) goto fireclear;
+                    else if (x > 0 && map.cells[bottom - 1].type == WOOD) movements[j++] = bottom - 1;
+                    if (x < map.width-1 && map.cells[bottom + 1].type == WATER) goto fireclear;
+                    else if (x < map.width-1 && map.cells[bottom + 1].type == WOOD) movements[j++] = bottom + 1;
                 }
                 if (j > 0) {
                     float r = random();
@@ -265,65 +269,65 @@ void update(Cell map[]) {
                         break;
 
                     j *= random(); // Случайное сичло в диапазоне 0..j
-                    map[movements[j]].type = FIRE;
+                    map.cells[movements[j]].type = FIRE;
                     if (movements[j] > bottom-1) // Пропуск обновления новой ячейки огня, если она будет ещё раз обрабатываться в цикле за этот кадр
-                        map[movements[j]].skip_update = true;
+                        map.cells[movements[j]].skip_update = true;
                     if (r < 0.06f) {
-                        map[current].type = (r < 0.04f) ? ASH : FIRE;
+                        map.cells[current].type = (r < 0.04f) ? ASH : FIRE;
                     } else {
-                        map[current].type = EMPTY;
+                        map.cells[current].type = EMPTY;
                     }
                 } else {
                     fireclear:
-                    map[current].type = EMPTY;
+                    map.cells[current].type = EMPTY;
                 }
                 break;
             case BOMB:
                 if (y > 0) {
-                    if (map[top].type == FIRE) goto boom;
-                    if (x > 0 && map[top - 1].type == FIRE) goto boom;
-                    if (x < MAPW-1 && map[top + 1].type == FIRE) goto boom;
+                    if (map.cells[top].type == FIRE) goto boom;
+                    if (x > 0 && map.cells[top - 1].type == FIRE) goto boom;
+                    if (x < map.width-1 && map.cells[top + 1].type == FIRE) goto boom;
                 }
-                if (x > 0 && map[current - 1].type == FIRE) goto boom;
-                if (x < MAPW-1 && map[current + 1].type == FIRE) goto boom;
-                if (y < MAPH-1) {
-                    if (map[bottom].type == FIRE) goto boom;
-                    if (x > 0 && map[bottom - 1].type == FIRE) goto boom;
-                    if (x < MAPW-1 && map[bottom + 1].type == FIRE) goto boom;
+                if (x > 0 && map.cells[current - 1].type == FIRE) goto boom;
+                if (x < map.width-1 && map.cells[current + 1].type == FIRE) goto boom;
+                if (y < map.height-1) {
+                    if (map.cells[bottom].type == FIRE) goto boom;
+                    if (x > 0 && map.cells[bottom - 1].type == FIRE) goto boom;
+                    if (x < map.width-1 && map.cells[bottom + 1].type == FIRE) goto boom;
                 }
-                if (map[current].timer >= 50) {
+                if (map.cells[current].timer >= 50) {
                     boom:
                     for (int cy = y-3; cy <= y+3; cy++) {
                         for (int cx = x-7; cx <= x+7; cx++) {
-                            if (cx >= 0 && cx <= (MAPW-1) && cy >= 0 && cy <= (MAPH-1)) {
+                            if (cx >= 0 && cx <= (map.width-1) && cy >= 0 && cy <= (map.height-1)) {
                                 if (rand() % 6 == 0) continue;
                                 
-                                int ncurrent = cy*MAPW + cx;
+                                int ncurrent = cy*map.width + cx;
 
                                 if (cx >= x-1 && cx <= x+1 && cy >= y-1 && cy <= y+1) {
-                                    map[ncurrent].type = EMPTY;
+                                    map.cells[ncurrent].type = EMPTY;
                                 } else if (cx >= x-4 && cx <= x+4 && cy >= y-2 && cy <= y+2) {
-                                    map[ncurrent].type = FIRE;
-                                } else if (map[ncurrent].type != EMPTY) {
+                                    map.cells[ncurrent].type = FIRE;
+                                } else if (map.cells[ncurrent].type != EMPTY) {
                                     int nx = cx + sign(cx-x) * (rand() % (abs(x-cx)+4));
                                     int ny = cy + sign(cy-y) * (rand() % (abs(y-cy)+4));
-                                    if (nx >= 0 && nx <= (MAPW-1) && ny >= 0 && ny <= (MAPH-1)) {
-                                        int idx = (ny) * MAPW + (nx);
-                                        map[idx].type = map[ncurrent].type;
-                                        map[idx].timer = 0;
-                                        map[ncurrent].type = FIRE;
+                                    if (nx >= 0 && nx <= (map.width-1) && ny >= 0 && ny <= (map.height-1)) {
+                                        int idx = (ny) * map.width + (nx);
+                                        map.cells[idx].type = map.cells[ncurrent].type;
+                                        map.cells[idx].timer = 0;
+                                        map.cells[ncurrent].type = FIRE;
                                     }
                                 }
-                                map[ncurrent].timer = 0;
+                                map.cells[ncurrent].timer = 0;
                                 if (cy >= y)
-                                    map[ncurrent].skip_update = true;
+                                    map.cells[ncurrent].skip_update = true;
                             }
                         }
                     }
-                    map[current].type = EMPTY;
-                    map[current].timer = 0;
+                    map.cells[current].type = EMPTY;
+                    map.cells[current].timer = 0;
                 } else {
-                    map[current].timer++;
+                    map.cells[current].timer++;
                 }
                 break;
             }
@@ -335,7 +339,7 @@ void update(Cell map[]) {
 
 typedef struct {
     Cursor *cr; // Указатель на структуру курсора
-    Cell *mp; // Указатель на массив ячеек
+    CellsMap mp; // Структура с массивом ячеек
 } InputThreadArgs;
 
 bool run = true;
@@ -343,7 +347,7 @@ bool run = true;
 // Функция обработки ввода в отдельном потоке
 int input_thread_loop(void *args) {
     Cursor *curs = ((InputThreadArgs *)args)->cr;
-    Cell *map = ((InputThreadArgs *)args)->mp;
+    CellsMap map = ((InputThreadArgs *)args)->mp;
 
     bool button1 = false; // Нажата ли ЛКМ
     bool button3 = false; // Нажато ли колёсико мыши
@@ -363,14 +367,14 @@ int input_thread_loop(void *args) {
             }
             break;
         case KEY_DOWN:
-            if (curs->y < (MAPH-1)) {
+            if (curs->y < (map.height-1)) {
                 mtx_lock(&curs_mtx);
                 curs->y++;
                 mtx_unlock(&curs_mtx);
             }
             break;
         case KEY_RIGHT:
-            if (curs->x < (MAPW-1)) {
+            if (curs->x < (map.width-1)) {
                 mtx_lock(&curs_mtx);
                 curs->x++;
                 mtx_unlock(&curs_mtx);
@@ -386,8 +390,8 @@ int input_thread_loop(void *args) {
         case KEY_MOUSE:
             if (getmouse(&event) == OK) {
                 mtx_lock(&curs_mtx);
-                if (event.x > 0 && event.x < MAPW+1) curs->x = event.x-1;
-                if (event.y > 0 && event.y < MAPH+1) curs->y = event.y-1;
+                if (event.x > 0 && event.x < map.width+1) curs->x = event.x-1;
+                if (event.y > 0 && event.y < map.height+1) curs->y = event.y-1;
 
                 if (event.bstate == BUTTON1_PRESSED) {
                     button1 = true;
@@ -407,12 +411,12 @@ int input_thread_loop(void *args) {
             break;
         case ' ':
             mtx_lock(&map_mtx);
-            map[curs->y*MAPW + curs->x].type = curs->brush;
+            map.cells[curs->y*map.width + curs->x].type = curs->brush;
             mtx_unlock(&map_mtx);
             break;
         case 'c':
             mtx_lock(&map_mtx);
-            memset(map, EMPTY, sizeof(Cell) * MAPSIZE);
+            memset(map.cells, EMPTY, sizeof(Cell) * map.width*map.height);
             mtx_unlock(&map_mtx);
             break;
         case '+':
@@ -442,11 +446,11 @@ int input_thread_loop(void *args) {
             if (y < 0) y = 0;
 
             mtx_lock(&map_mtx);
-            for (; y <= curs->y+(curs->brush_size/2) && y <= (MAPH-1); y++) {
+            for (; y <= curs->y+(curs->brush_size/2) && y <= (map.height-1); y++) {
                 int x = curs->x-curs->brush_size+1;
                 if (x < 0) x = 0;
-                for (; x <= curs->x+curs->brush_size-1 && x <= (MAPW-1); x++) {
-                    map[y*MAPW + x].type = (button1 ? curs->brush : EMPTY);
+                for (; x <= curs->x+curs->brush_size-1 && x <= (map.width-1); x++) {
+                    map.cells[y*map.width + x].type = (button1 ? curs->brush : EMPTY);
                 }
             }
             mtx_unlock(&map_mtx);
@@ -465,7 +469,7 @@ int main(int argc, char *argv[]) {
     }
 
     if (!initscr()) {
-        fprintf(stderr, "%s: error initialising ncurses", prog);
+        fprintf(stderr, "%s: error initialising ncurses\n", prog);
         return 1;
     }
     initscr();
@@ -514,18 +518,29 @@ int main(int argc, char *argv[]) {
 
     wattron(win, COLOR_PAIR(EMPTY));
 
-    Cell map[MAPSIZE];
-    memset(map, EMPTY, sizeof(Cell) * MAPSIZE);
-    for (int y = 4; y < 14; y++) {
-        for (int x = 20; x < 100; x++) {
-            map[y*MAPW + x].type = STONE;
-        }
+    CellsMap map = {.cells = NULL, .width = COLS-2, .height = LINES-2};
+    map.cells = calloc(MAPW*MAPH, sizeof(Cell));
+    if (map.cells == NULL) {
+        fprintf(stderr, "%s: error allocating memory\n", prog);
+
+        printf("\033[?1003l\n");
+        curs_set(1);
+        delwin(win);
+        endwin();
+
+        return 1;
     }
-    for (int i = 0; i < MAPSIZE; i++) {
+    //memset(map, EMPTY, sizeof(Cell) * MAPSIZE);
+    /*for (int y = 4; y < 14; y++) {
+        for (int x = 20; x < 100; x++) {
+            map.cells[y*MAPW + x].type = STONE;
+        }
+    }*/
+    for (int i = 0; i < map.width*map.height; i++) {
         if (rand() % 2)
-            map[i].type = EMPTY;
+            map.cells[i].type = EMPTY;
         else
-            map[i].type = SAND;
+            map.cells[i].type = SAND;
     }
     
 
@@ -557,6 +572,8 @@ int main(int argc, char *argv[]) {
     curs_set(1);
     delwin(win);
     endwin();
+
+    free(map.cells);
 
     return 0;
 }
