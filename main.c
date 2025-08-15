@@ -7,7 +7,7 @@
 #include <ncurses.h>
 #include <pthread.h>
 
-#define NS 1000000000 // Количество наносекунд в секунде
+#define NS 1000000000L // Количество наносекунд в секунде
 #define DEFAULT_TARGET_TPS 30
 #define CURSOR_ID 10 // Номер цветовой пары для курсора
 #define CURSOR_SPRITE '*' // Символ курсора, если будет пробел на карте на месте курсора
@@ -677,13 +677,16 @@ int main(int argc, char *argv[]) {
         update(map);
         render(win, map, curs, cells_info);
 
-        struct timespec delay = {0, (NS / target_tps) - ((clock()-start_clock) / (CLOCKS_PER_SEC * NS))};
-        if (target_tps == 1) {
-            delay.tv_nsec = 0;
-            delay.tv_sec = 1;
+        if (target_tps > 0) {
+            struct timespec delay = {0, 0};
+            if (target_tps == 1) {
+                delay.tv_sec = 1;
+            } else {
+                delay.tv_nsec = (NS / target_tps) - ((clock()-start_clock) / (CLOCKS_PER_SEC * NS));
+            }
+
+            nanosleep(&delay, NULL);
         }
-        nanosleep(&delay, NULL);
-        
     } while (run);
 
     pthread_mutex_destroy(&map_mtx);
