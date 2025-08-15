@@ -5,7 +5,7 @@
 #include <stdbool.h>
 #include <ctype.h>
 #include <ncurses.h>
-#include <threads.h>
+#include <pthread.h>
 
 #define NS 1000000000 // Количество наносекунд в секунде
 #define DEFAULT_TARGET_TPS 30
@@ -109,12 +109,12 @@ void rotate(int array[], size_t len, int n) {
     memcpy(array, t, n*sizeof(int));
 }
 
-mtx_t map_mtx;
-mtx_t curs_mtx;
+pthread_mutex_t map_mtx;
+pthread_mutex_t curs_mtx;
 
 void render(WINDOW *window, CellsMap map, Cursor cursor, CellInfo cells_info[]) {
-    mtx_lock(&map_mtx);
-    mtx_lock(&curs_mtx);
+    pthread_mutex_lock(&map_mtx);
+    pthread_mutex_lock(&curs_mtx);
     for (int y = 0; y < map.height; y++) {
         for (int x = 0; x < map.width; x++) {
             int current = y*map.width + x;
@@ -150,7 +150,7 @@ void render(WINDOW *window, CellsMap map, Cursor cursor, CellInfo cells_info[]) 
             }
         }
     }
-    mtx_unlock(&map_mtx);
+    pthread_mutex_unlock(&map_mtx);
 
     CellInfo brush_info = cells_info[cursor.brush];
 
@@ -159,7 +159,7 @@ void render(WINDOW *window, CellsMap map, Cursor cursor, CellInfo cells_info[]) 
 
     char brushsize_str[3];
     sprintf(brushsize_str, "%d", (cursor.brush_size <= 99 ? cursor.brush_size : 99));
-    mtx_unlock(&curs_mtx);
+    pthread_mutex_unlock(&curs_mtx);
     wmove(window, 1, 3);
     waddstr(window, brushsize_str);
 
@@ -175,7 +175,7 @@ void update(CellsMap map) {
         order[i] = i;
     shuffle(order, map.width); // Перемешивание массива, чтобы ячейки обрабатывались в случайном порядке
     
-    mtx_lock(&map_mtx);
+    pthread_mutex_lock(&map_mtx);
 
     for (int y = map.height-1; y >= 0; y--) { // y - координата ячейки по Y
         rotate(order, map.width, rand() % map.width);
@@ -331,7 +331,7 @@ void update(CellsMap map) {
         }
     }
 
-    mtx_unlock(&map_mtx);
+    pthread_mutex_unlock(&map_mtx);
 }
 
 typedef struct {
@@ -341,11 +341,11 @@ typedef struct {
 
 bool run = true;
 bool cellselect_open = false;
-mtx_t cellselect_mtx;
-cnd_t cellselect_cnd;
+pthread_mutex_t cellselect_mtx;
+pthread_cond_t cellselect_cnd;
 
 // Функция обработки ввода в отдельном потоке
-int input_thread_loop(void *args) {
+void *input_thread_loop(void *args) {
     Cursor *curs = ((InputThreadArgs *)args)->cr;
     CellsMap map = ((InputThreadArgs *)args)->mp;
 
@@ -361,35 +361,35 @@ int input_thread_loop(void *args) {
             break;
         case KEY_UP:
             if (curs->y > 0) {
-                mtx_lock(&curs_mtx);
+                pthread_mutex_lock(&curs_mtx);
                 curs->y--;
-                mtx_unlock(&curs_mtx);
+                pthread_mutex_unlock(&curs_mtx);
             }
             break;
         case KEY_DOWN:
             if (curs->y < (map.height-1)) {
-                mtx_lock(&curs_mtx);
+                pthread_mutex_lock(&curs_mtx);
                 curs->y++;
-                mtx_unlock(&curs_mtx);
+                pthread_mutex_unlock(&curs_mtx);
             }
             break;
         case KEY_RIGHT:
             if (curs->x < (map.width-1)) {
-                mtx_lock(&curs_mtx);
+                pthread_mutex_lock(&curs_mtx);
                 curs->x++;
-                mtx_unlock(&curs_mtx);
+                pthread_mutex_unlock(&curs_mtx);
             }
             break;
         case KEY_LEFT:
             if (curs->x > 0) {
-                mtx_lock(&curs_mtx);
+                pthread_mutex_lock(&curs_mtx);
                 curs->x--;
-                mtx_unlock(&curs_mtx);
+                pthread_mutex_unlock(&curs_mtx);
             }
             break;
         case KEY_MOUSE:
             if (getmouse(&event) == OK) {
-                mtx_lock(&curs_mtx);
+                pthread_mutex_lock(&curs_mtx);
                 if (event.x > 0 && event.x < map.width+1) curs->x = event.x-1;
                 if (event.y > 0 && event.y < map.height+1) curs->y = event.y-1;
 
@@ -406,46 +406,46 @@ int input_thread_loop(void *args) {
                 } else if (event.bstate == BUTTON5_PRESSED) {
                     if (curs->brush_size > 1) curs->brush_size--;
                 }
-                mtx_unlock(&curs_mtx);
+                pthread_mutex_unlock(&curs_mtx);
             }
             break;
         case ' ':
-            mtx_lock(&map_mtx);
+            pthread_mutex_lock(&map_mtx);
             map.cells[curs->y*map.width + curs->x].type = curs->brush;
-            mtx_unlock(&map_mtx);
+            pthread_mutex_unlock(&map_mtx);
             break;
         case 'c':
-            mtx_lock(&map_mtx);
+            pthread_mutex_lock(&map_mtx);
             memset(map.cells, EMPTY, sizeof(Cell) * map.width*map.height);
-            mtx_unlock(&map_mtx);
+            pthread_mutex_unlock(&map_mtx);
             break;
         case '+':
             if (curs->brush_size < 99) {
-                mtx_lock(&curs_mtx);
+                pthread_mutex_lock(&curs_mtx);
                 curs->brush_size++;
-                mtx_unlock(&curs_mtx);
+                pthread_mutex_unlock(&curs_mtx);
             }
             break;
         case '-':
             if (curs->brush_size > 1) {
-                mtx_lock(&curs_mtx);
+                pthread_mutex_lock(&curs_mtx);
                 curs->brush_size--;
-                mtx_unlock(&curs_mtx);
+                pthread_mutex_unlock(&curs_mtx);
             }
             break;
         case '\t':
             cellselect_open = true;
-            mtx_lock(&cellselect_mtx);
+            pthread_mutex_lock(&cellselect_mtx);
             while (cellselect_open) {
-                cnd_wait(&cellselect_cnd, &cellselect_mtx);
+                pthread_cond_wait(&cellselect_cnd, &cellselect_mtx);
             }
-            mtx_unlock(&cellselect_mtx);
+            pthread_mutex_unlock(&cellselect_mtx);
             break;
         default:
             if (isdigit(c) && (c-'0' < NUM_CELL_TYPES)) {
-                mtx_lock(&curs_mtx);
+                pthread_mutex_lock(&curs_mtx);
                 curs->brush = c - '0';
-                mtx_unlock(&curs_mtx);
+                pthread_mutex_unlock(&curs_mtx);
             }
             break;
         }
@@ -453,7 +453,7 @@ int input_thread_loop(void *args) {
             int y = curs->y-(curs->brush_size/2);
             if (y < 0) y = 0;
 
-            mtx_lock(&map_mtx);
+            pthread_mutex_lock(&map_mtx);
             for (; y <= curs->y+(curs->brush_size/2) && y <= (map.height-1); y++) {
                 int x = curs->x-curs->brush_size+1;
                 if (x < 0) x = 0;
@@ -461,12 +461,12 @@ int input_thread_loop(void *args) {
                     map.cells[y*map.width + x].type = (button1 ? curs->brush : EMPTY);
                 }
             }
-            mtx_unlock(&map_mtx);
+            pthread_mutex_unlock(&map_mtx);
         }
         
     } while (run);
 
-    return 0;
+    return NULL;
 }
 
 int main(int argc, char *argv[]) {
@@ -554,14 +554,15 @@ int main(int argc, char *argv[]) {
 
     Cursor curs = {0, 2, .brush = SAND, .brush_size=1};
 
-    mtx_init(&curs_mtx, mtx_plain);
-    mtx_init(&map_mtx, mtx_plain);
-    mtx_init(&cellselect_mtx, mtx_plain);
-    cnd_init(&cellselect_cnd);
+    pthread_mutex_init(&curs_mtx, NULL);
+    pthread_mutex_init(&map_mtx, NULL);
+    pthread_mutex_init(&cellselect_mtx, NULL);
+    pthread_cond_init(&cellselect_cnd, NULL);
 
     InputThreadArgs input_thrd_args = {.cr = &curs, .mp = map};
-    thrd_t input_thrd;
-    thrd_create(&input_thrd, input_thread_loop, &input_thrd_args);
+    pthread_t input_thrd;
+    pthread_create(&input_thrd, NULL, input_thread_loop, &input_thrd_args);
+    pthread_detach(input_thrd);
 
     do {
         if (cellselect_open) {
@@ -665,10 +666,10 @@ int main(int argc, char *argv[]) {
 
             delwin(cs_win);
 
-            mtx_lock(&cellselect_mtx);
+            pthread_mutex_lock(&cellselect_mtx);
             cellselect_open = false;
-            cnd_signal(&cellselect_cnd);
-            mtx_unlock(&cellselect_mtx);
+            pthread_cond_signal(&cellselect_cnd);
+            pthread_mutex_unlock(&cellselect_mtx);
         }
 
         clock_t start_clock = clock();
@@ -685,10 +686,10 @@ int main(int argc, char *argv[]) {
         
     } while (run);
 
-    mtx_destroy(&map_mtx);
-    mtx_destroy(&curs_mtx);
-    mtx_destroy(&cellselect_mtx);
-    cnd_destroy(&cellselect_cnd);
+    pthread_mutex_destroy(&map_mtx);
+    pthread_mutex_destroy(&curs_mtx);
+    pthread_mutex_destroy(&cellselect_mtx);
+    pthread_cond_destroy(&cellselect_cnd);
 
     printf("\033[?1003l\n");
     curs_set(1);
