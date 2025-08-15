@@ -11,6 +11,8 @@
 #define DEFAULT_TARGET_TPS 30
 #define CURSOR_ID 10 // Номер цветовой пары для курсора
 #define CURSOR_SPRITE '*' // Символ курсора, если будет пробел на карте на месте курсора
+#define NUM_CELL_TYPES 8 // Количество типов клеток
+#define CS_SPACES 4 // Сколько пробелов будет между названиями ячеек в меню
 
 #define MAPW (COLS-2) // Ширина поля с ячейками на основе размера терминала
 #define MAPH (LINES-2) // Высота поля с ячейками на основе размера терминала
@@ -110,12 +112,7 @@ void rotate(int array[], size_t len, int n) {
 mtx_t map_mtx;
 mtx_t curs_mtx;
 
-void render(WINDOW *window, CellsMap map, Cursor cursor, CellInfo cells_info[], char *name) {
-    if (name != NULL) {
-        wmove(window, 0, 1);
-        waddstr(window, name);
-    }
-    
+void render(WINDOW *window, CellsMap map, Cursor cursor, CellInfo cells_info[]) {
     mtx_lock(&map_mtx);
     mtx_lock(&curs_mtx);
     for (int y = 0; y < map.height; y++) {
@@ -343,6 +340,9 @@ typedef struct {
 } InputThreadArgs;
 
 bool run = true;
+bool cellselect_open = false;
+mtx_t cellselect_mtx;
+cnd_t cellselect_cnd;
 
 // Функция обработки ввода в отдельном потоке
 int input_thread_loop(void *args) {
@@ -433,8 +433,16 @@ int input_thread_loop(void *args) {
                 mtx_unlock(&curs_mtx);
             }
             break;
+        case '\t':
+            cellselect_open = true;
+            mtx_lock(&cellselect_mtx);
+            while (cellselect_open) {
+                cnd_wait(&cellselect_cnd, &cellselect_mtx);
+            }
+            mtx_unlock(&cellselect_mtx);
+            break;
         default:
-            if (isdigit(c)) {
+            if (isdigit(c) && (c-'0' < NUM_CELL_TYPES)) {
                 mtx_lock(&curs_mtx);
                 curs->brush = c - '0';
                 mtx_unlock(&curs_mtx);
@@ -548,16 +556,125 @@ int main(int argc, char *argv[]) {
 
     mtx_init(&curs_mtx, mtx_plain);
     mtx_init(&map_mtx, mtx_plain);
+    mtx_init(&cellselect_mtx, mtx_plain);
+    cnd_init(&cellselect_cnd);
 
     InputThreadArgs input_thrd_args = {.cr = &curs, .mp = map};
     thrd_t input_thrd;
     thrd_create(&input_thrd, input_thread_loop, &input_thrd_args);
 
     do {
+        if (cellselect_open) {
+            // cs = cellselect
+            int cs_win_height = map.height/1.5;
+            int cs_win_width = map.width/1.5;
+            int cs_win_x = map.width/6;
+            int cs_win_y = map.height/6;
+
+            WINDOW *cs_win = newwin(cs_win_height, cs_win_width, cs_win_y, cs_win_x);
+            nodelay(cs_win, TRUE);
+            keypad(cs_win, TRUE);
+            
+            box(cs_win, 0, 0);
+            wmove(cs_win, 0, 2);
+            waddstr(cs_win, "Cells menu");
+            wrefresh(cs_win);
+
+            //thrd_sleep(&(struct timespec){.tv_sec = 3}, NULL);
+
+            bool first_run = true;
+            int c;
+            while ((c = getch()) != '\t') {
+                if (first_run == true)
+                    first_run = false;
+                else if (c == EOF)
+                    continue;
+                else if (c == 'q') {
+                    run = false;
+                    break;
+                } else if (c == KEY_RIGHT) {
+                    if (curs.brush < NUM_CELL_TYPES-1) curs.brush++;
+                } else if (c == KEY_LEFT) {
+                    if (curs.brush > 0) curs.brush--;
+                } else if (c == KEY_MOUSE) {
+                    MEVENT event;
+                    if (getmouse(&event) == OK && event.bstate == BUTTON1_PRESSED
+                                               && event.x >= cs_win_x+2 && event.x <= cs_win_x+cs_win_width-2 \
+                                               && event.y >= cs_win_y+1 && event.y <= cs_win_y+cs_win_height-1) {
+                        int click_x = event.x - cs_win_x;
+                        int click_y = event.y - cs_win_y;
+
+                        int line_num = 0;
+                        int line_len = 0;
+                        for (int i = 0; i < NUM_CELL_TYPES; i++) {
+                            int cellname_len = strlen(cells_info[i].name);
+                            if (line_len + cellname_len + 2 + CS_SPACES > cs_win_width-4) {
+                                line_num += 2;
+                                line_len = 0;
+                            }
+                            line_len += cellname_len + (line_len == 0 ? 0 : CS_SPACES) + 2;
+
+                            if (line_num == click_y-1 && line_len > click_x-2) {
+                                if (line_len - (click_x-2) < cellname_len+3) {
+                                    curs.brush = i;
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
+                
+                int line_num = 0;
+                int line_len = 0;
+                for (int i = 0; i < NUM_CELL_TYPES; i++) {
+                    int cellname_len = strlen(cells_info[i].name);
+                    if (line_len + cellname_len + 2 + CS_SPACES > cs_win_width-4) {
+                        line_num++;
+                        line_len = 0;
+                    }
+                    wmove(cs_win, line_num*2 + 1, (line_len == 0 ? 0 : line_len+CS_SPACES) + 2);
+                    waddch(cs_win, cells_info[i].sprites[0] | COLOR_PAIR(cells_info[i].colors[0]));
+                    if ((CellType)i == curs.brush) {
+                        waddch(cs_win, ' ' | COLOR_PAIR(CURSOR_ID) | A_PROTECT);
+                    } else {
+                        waddch(cs_win, ' ' | COLOR_PAIR(EMPTY) | A_PROTECT);
+                    }
+                    if ((CellType)i == curs.brush) {
+                        wattron(cs_win, COLOR_PAIR(CURSOR_ID));
+                        waddstr(cs_win, cells_info[i].name);
+                        wattroff(cs_win, COLOR_PAIR(CURSOR_ID));
+                    } else {
+                        waddstr(cs_win, cells_info[i].name);
+                    }
+                    line_len += cellname_len + (line_len == 0 ? 0 : CS_SPACES) + 2;
+                }
+
+                CellInfo brush_info = cells_info[curs.brush];
+
+                wmove(win, 1, 1);
+                waddch(win, brush_info.sprites[0] | COLOR_PAIR(brush_info.colors[0]));
+
+                wmove(win, 1, 6);
+                waddstr(win, brush_info.name);
+                for (int i = 0; i < (10-(int)strlen(brush_info.name)); i++)
+                    waddch(win, ' ');
+
+                wrefresh(win);
+                wrefresh(cs_win);
+            }
+
+            delwin(cs_win);
+
+            mtx_lock(&cellselect_mtx);
+            cellselect_open = false;
+            cnd_signal(&cellselect_cnd);
+            mtx_unlock(&cellselect_mtx);
+        }
+
         clock_t start_clock = clock();
 
         update(map);
-        render(win, map, curs, cells_info, NULL);
+        render(win, map, curs, cells_info);
 
         struct timespec delay = {0, (NS / target_tps) - ((clock()-start_clock) / (CLOCKS_PER_SEC * NS))};
         if (target_tps == 1) {
@@ -567,6 +684,11 @@ int main(int argc, char *argv[]) {
         nanosleep(&delay, NULL);
         
     } while (run);
+
+    mtx_destroy(&map_mtx);
+    mtx_destroy(&curs_mtx);
+    mtx_destroy(&cellselect_mtx);
+    cnd_destroy(&cellselect_cnd);
 
     printf("\033[?1003l\n");
     curs_set(1);
