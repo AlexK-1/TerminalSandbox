@@ -6,6 +6,7 @@
 #include <ctype.h>
 #include <ncurses.h>
 #include <pthread.h>
+#include <signal.h>
 
 #define NS 1000000000L // Количество наносекунд в секунде
 #define DEFAULT_TARGET_TPS 30
@@ -25,14 +26,6 @@
 #define watercanmove(cellidx) (map.cells[cellidx].type == EMPTY) // Проверка на то, может ли в клетку перейти вода
 #define watercanmover(cellidx, x) (watercanmove(cellidx) && (x < map.width-1)) // Проверка на то, может ли в клетку перейти вода, границы справа
 #define watercanmovel(cellidx, x) (watercanmove(cellidx) && (x > 0)) // Проверка на то, может ли в клетку перейти вода, границы слева
-
-// Меняет местами ячейки A и B в таблицах map и nmap
-#define cellswap(a, b)                  \
-        do {                            \
-            nmap[a] = map[b];           \
-            nmap[b] = map[a];           \
-            map[b] = EMPTY;             \
-        } while (0)
 
 #define swap(a, b, t)                   \
         do {                            \
@@ -115,9 +108,13 @@ pthread_mutex_t curs_mtx;
 void render(WINDOW *window, CellsMap map, Cursor cursor, CellInfo cells_info[]) {
     pthread_mutex_lock(&map_mtx);
     pthread_mutex_lock(&curs_mtx);
-    for (int y = 0; y < map.height; y++) {
-        for (int x = 0; x < map.width; x++) {
+
+    int render_height = (MAPH < map.height ? MAPH : map.height);
+    int render_width = (MAPW < map.width ? MAPW : map.width);
+    for (int y = 0; y < render_height; y++) {
+        for (int x = 0; x < render_width; x++) {
             int current = y*map.width + x;
+
             if (map.cells[current].skip_render) {
                 map.cells[current].skip_render = false;
                 continue;
@@ -140,7 +137,10 @@ void render(WINDOW *window, CellsMap map, Cursor cursor, CellInfo cells_info[]) 
                     int neighbors_y[8] = {y-1, y-1, y-1, y, y, y+1, y+1, y+1};
                     
                     for (int i = 0; i < 8; i++) {
-                        if (neighbors_x[i] >= 0 && neighbors_x[i] <= (map.width-1) && neighbors_y[i] >= 0 && neighbors_y[i] <= (map.height-1) && (rand() % 10 < 3)) {
+                        if (neighbors_x[i] >= 0 && neighbors_x[i] <= (render_width-1) && \
+                            neighbors_y[i] >= 0 && neighbors_y[i] <= (render_height-1) && \
+                            (rand() % 10 < 3))
+                        {
                             map.cells[neighbors_y[i]*map.width + neighbors_x[i]].skip_render = true;
                             wmove(window, neighbors_y[i]+1, neighbors_x[i]+1);
                             waddch(window, cells_info[FIRE].sprites[rand() % 2] | COLOR_PAIR(cells_info[FIRE].colors[rand() % 2]));
@@ -170,6 +170,8 @@ void render(WINDOW *window, CellsMap map, Cursor cursor, CellInfo cells_info[]) 
 }
 
 void update(CellsMap map) {
+    //fputs("--------------update start--------------\n", stderr);
+
     int order[map.width]; // Массив с порядком обработки ячеек
     for (int i = 0; i < map.width; i++)
         order[i] = i;
@@ -200,10 +202,11 @@ void update(CellsMap map) {
                 break;
             case ASH:
             case SAND:
-                if (y == map.height-1) {
+                if (y >= map.height-1) {
                     break;
                 }
-               if (canmove(bottom)) {
+
+                if (canmove(bottom)) {
                     swap(map.cells[current], map.cells[bottom], t);
                 } else if (canmovel(bottom - 1, x) && canmover(bottom + 1, x)) {
                     int idx = bottom + (rand() % 2 ? 1 : -1);
@@ -332,14 +335,17 @@ void update(CellsMap map) {
     }
 
     pthread_mutex_unlock(&map_mtx);
+
+    //fputs("---------------update end---------------\n", stderr);
 }
 
 typedef struct {
     Cursor *cr; // Указатель на структуру курсора
-    CellsMap mp; // Структура с массивом ячеек
+    CellsMap *mp; // Структура с массивом ячеек
 } InputThreadArgs;
 
 bool run = true;
+bool pause = false;
 bool cellselect_open = false;
 pthread_mutex_t cellselect_mtx;
 pthread_cond_t cellselect_cnd;
@@ -347,15 +353,18 @@ pthread_cond_t cellselect_cnd;
 // Функция обработки ввода в отдельном потоке
 void *input_thread_loop(void *args) {
     Cursor *curs = ((InputThreadArgs *)args)->cr;
-    CellsMap map = ((InputThreadArgs *)args)->mp;
+    CellsMap *map = ((InputThreadArgs *)args)->mp;
 
     bool button1 = false; // Нажата ли ЛКМ
     bool button3 = false; // Нажато ли колёсико мыши
+    bool space = false; // Был ли нажат пробел
 
     do {
-        int c;
+        int c = getch();
+        if (pause && c != 'p' && c != 'q') continue; 
+
         MEVENT event;
-        switch (c = getch()) {
+        switch (c) {
         case 'q':
             run = false;
             break;
@@ -367,14 +376,14 @@ void *input_thread_loop(void *args) {
             }
             break;
         case KEY_DOWN:
-            if (curs->y < (map.height-1)) {
+            if (curs->y < (map->height-1)) {
                 pthread_mutex_lock(&curs_mtx);
                 curs->y++;
                 pthread_mutex_unlock(&curs_mtx);
             }
             break;
         case KEY_RIGHT:
-            if (curs->x < (map.width-1)) {
+            if (curs->x < (map->width-1)) {
                 pthread_mutex_lock(&curs_mtx);
                 curs->x++;
                 pthread_mutex_unlock(&curs_mtx);
@@ -390,8 +399,8 @@ void *input_thread_loop(void *args) {
         case KEY_MOUSE:
             if (getmouse(&event) == OK) {
                 pthread_mutex_lock(&curs_mtx);
-                if (event.x > 0 && event.x < map.width+1) curs->x = event.x-1;
-                if (event.y > 0 && event.y < map.height+1) curs->y = event.y-1;
+                if (event.x > 0 && event.x < map->width+1) curs->x = event.x-1;
+                if (event.y > 0 && event.y < map->height+1) curs->y = event.y-1;
 
                 if (event.bstate == BUTTON1_PRESSED) {
                     button1 = true;
@@ -401,22 +410,26 @@ void *input_thread_loop(void *args) {
                     button3 = true;
                 } else if (event.bstate == BUTTON2_RELEASED) {
                     button3 = false;
-                } else if (event.bstate == BUTTON4_PRESSED) {
+                }
+                #ifdef BUTTON4_PRESSED
+                else if (event.bstate == BUTTON4_PRESSED) {
                     if (curs->brush_size < 99) curs->brush_size++;
-                } else if (event.bstate == BUTTON5_PRESSED) {
+                } 
+                #endif
+                #ifdef BUTTON5_PRESSED
+                else if (event.bstate == BUTTON5_PRESSED) {
                     if (curs->brush_size > 1) curs->brush_size--;
                 }
+                #endif
                 pthread_mutex_unlock(&curs_mtx);
             }
             break;
         case ' ':
-            pthread_mutex_lock(&map_mtx);
-            map.cells[curs->y*map.width + curs->x].type = curs->brush;
-            pthread_mutex_unlock(&map_mtx);
+            space = true;
             break;
         case 'c':
             pthread_mutex_lock(&map_mtx);
-            memset(map.cells, EMPTY, sizeof(Cell) * map.width*map.height);
+            memset(map->cells, EMPTY, sizeof(Cell) * map->width*map->height);
             pthread_mutex_unlock(&map_mtx);
             break;
         case '+':
@@ -441,6 +454,9 @@ void *input_thread_loop(void *args) {
             }
             pthread_mutex_unlock(&cellselect_mtx);
             break;
+        case 'p':
+            pause ^= 1;
+            break;
         default:
             if (isdigit(c) && (c-'0' < NUM_CELL_TYPES)) {
                 pthread_mutex_lock(&curs_mtx);
@@ -449,19 +465,21 @@ void *input_thread_loop(void *args) {
             }
             break;
         }
-        if (button1 || button3) {
+        if (button1 || button3 || space) {
             int y = curs->y-(curs->brush_size/2);
             if (y < 0) y = 0;
 
             pthread_mutex_lock(&map_mtx);
-            for (; y <= curs->y+(curs->brush_size/2) && y <= (map.height-1); y++) {
+            for (; y <= curs->y+(curs->brush_size/2) && y <= (map->height-1); y++) {
                 int x = curs->x-curs->brush_size+1;
                 if (x < 0) x = 0;
-                for (; x <= curs->x+curs->brush_size-1 && x <= (map.width-1); x++) {
-                    map.cells[y*map.width + x].type = (button1 ? curs->brush : EMPTY);
+                for (; x <= curs->x+curs->brush_size-1 && x <= (map->width-1); x++) {
+                    map->cells[y*map->width + x].type = (button3 ? EMPTY : curs->brush);
                 }
             }
             pthread_mutex_unlock(&map_mtx);
+
+            space = false;
         }
         
     } while (run);
@@ -469,7 +487,15 @@ void *input_thread_loop(void *args) {
     return NULL;
 }
 
+bool win_change = false;
+
+void signal_win_change(void) {
+    win_change = true;
+}
+
 int main(int argc, char *argv[]) {
+    signal(SIGWINCH, (void (*)(int))signal_win_change);
+
     char *prog = argv[0];
     int target_tps = DEFAULT_TARGET_TPS;
     if (argc > 1) {
@@ -493,7 +519,7 @@ int main(int argc, char *argv[]) {
 
     WINDOW *win = newwin(LINES, COLS, 0, 0);
     box(win, 0, 0);
-    wrefresh(win);
+    refresh();
     
     start_color();
     init_color(COLOR_GRAY, 550, 550, 550);
@@ -551,7 +577,6 @@ int main(int argc, char *argv[]) {
             map.cells[i].type = SAND;
     }
     
-
     Cursor curs = {0, 2, .brush = SAND, .brush_size=1};
 
     pthread_mutex_init(&curs_mtx, NULL);
@@ -559,12 +584,30 @@ int main(int argc, char *argv[]) {
     pthread_mutex_init(&cellselect_mtx, NULL);
     pthread_cond_init(&cellselect_cnd, NULL);
 
-    InputThreadArgs input_thrd_args = {.cr = &curs, .mp = map};
+    InputThreadArgs input_thrd_args = {.cr = &curs, .mp = &map};
     pthread_t input_thrd;
     pthread_create(&input_thrd, NULL, input_thread_loop, &input_thrd_args);
     pthread_detach(input_thrd);
 
     do {
+        if (win_change) {
+            resizeterm(0, 0);
+
+            erase();
+            box(win, 0, 0);
+            refresh();
+
+            win_change = false;
+        }
+
+        if (pause) {
+            wmove(win, 1, getmaxx(win)-2-6);
+            waddstr(win, "Paused");
+            wrefresh(win);
+            
+            continue;
+        }
+
         if (cellselect_open) {
             // cs = cellselect
             int cs_win_height = map.height/1.5;
@@ -580,8 +623,6 @@ int main(int argc, char *argv[]) {
             wmove(cs_win, 0, 2);
             waddstr(cs_win, "Cells menu");
             wrefresh(cs_win);
-
-            //thrd_sleep(&(struct timespec){.tv_sec = 3}, NULL);
 
             bool first_run = true;
             int c;
