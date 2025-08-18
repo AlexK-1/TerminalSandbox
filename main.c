@@ -10,6 +10,7 @@
 
 #define NS 1000000000L // Количество наносекунд в секунде
 #define DEFAULT_TARGET_TPS 30
+#define WATER_ITERATIONS 100 // Amount of iterations for smoother water physics
 #define CURSOR_ID 10 // Номер цветовой пары для курсора
 #define CURSOR_SPRITE '*' // Символ курсора, если будет пробел на карте на месте курсора
 #define NUM_CELL_TYPES 9 // Количество типов клеток
@@ -201,7 +202,7 @@ void render(WINDOW *window, CellsMap map, Cursor cursor, CellInfo cells_info[]) 
     wrefresh(window);
 }
 
-void update(CellsMap map) {
+void update(CellsMap map, bool only_water) {
     int order[map.width]; // Массив с порядком обработки ячеек
     for (int i = 0; i < map.width; i++)
         order[i] = i;
@@ -218,6 +219,9 @@ void update(CellsMap map) {
                 map.cells[current].skip_update = false;
                 continue;
             }
+            if (only_water && map.cells[current].type != WATER)
+                continue;
+            
             int top = (y-1)*map.width + x;
             int bottom = (y+1)*map.width + x;
             Cell t;
@@ -798,7 +802,10 @@ int main(int argc, char *argv[]) {
 
         clock_t start_clock = clock();
 
-        update(map);
+        update(map, false);
+        for (int i = 0; i < WATER_ITERATIONS-1; i++)
+            update(map, true);
+        
         render(win, map, curs, cells_info);
 
         if (target_tps > 0) {
