@@ -10,7 +10,7 @@
 
 #define NS 1000000000L // Количество наносекунд в секунде
 #define DEFAULT_TARGET_TPS 30
-#define WATER_ITERATIONS 100 // Amount of iterations for smoother water physics
+#define DEFAULT_WATER_ITERATIONS 50 // Amount of iterations for smoother water physics
 #define CURSOR_ID 10 // Номер цветовой пары для курсора
 #define CURSOR_SPRITE '*' // Символ курсора, если будет пробел на карте на месте курсора
 #define NUM_CELL_TYPES 9 // Количество типов клеток
@@ -23,7 +23,7 @@
 #define sign(x) (x < 0 ? -1 : 1)
 #define clr(x) (short)(x/255.0f * 1000)
 #define incursor(x_, y_, cursor) (x_ >= cursor.x-cursor.brush_size+1 && x_ <= cursor.x+cursor.brush_size-1 && \
-                                  y_ >= cursor.y-(cursor.brush_size/2) && y_ <= cursor.y+(cursor.brush_size/2)) // Находится ли кнопка в пределах курсора
+                                  y_ >= cursor.y-(cursor.brush_size/(2-square_pixels))+square_pixels && y_ <= cursor.y+(cursor.brush_size/(2-square_pixels))-square_pixels) // Находится ли кнопка в пределах курсора
 
 #define canmove(cellidx) ((map.cells[cellidx].type == EMPTY  ||  \
                            map.cells[cellidx].type == WATER  ||  \
@@ -123,12 +123,18 @@ void rotate(int array[], size_t len, int n) {
 pthread_mutex_t map_mtx;
 pthread_mutex_t curs_mtx;
 
-void render(WINDOW *window, CellsMap map, Cursor cursor, CellInfo cells_info[]) {
+void render(WINDOW *window, CellsMap map, Cursor cursor, CellInfo cells_info[], bool square_pixels, bool simple_fire, bool simple_steam) {
     pthread_mutex_lock(&map_mtx);
     pthread_mutex_lock(&curs_mtx);
 
-    int render_height = (MAPH < map.height ? MAPH : map.height);
-    int render_width = (MAPW < map.width ? MAPW : map.width);
+    int render_height, render_width;
+    render_height = (MAPH < map.height ? MAPH : map.height);
+    if (square_pixels) {
+        render_width = (MAPW/2 < map.width ? MAPW/2 : map.width);
+    } else {
+        render_width = (MAPW < map.width ? MAPW : map.width);
+    }
+
     for (int y = 0; y < render_height; y++) {
         for (int x = 0; x < render_width; x++) {
             int current = y*map.width + x;
@@ -137,18 +143,25 @@ void render(WINDOW *window, CellsMap map, Cursor cursor, CellInfo cells_info[]) 
                 map.cells[current].skip_render = false;
                 continue;
             }
-            wmove(window, y+1, x+1);
+            wmove(window, y + 1, x*(1+square_pixels) + 1);
             CellInfo current_cell_info = cells_info[map.cells[current].type];
             if (incursor(x, y, cursor)) {
                 if (map.cells[current].type == EMPTY) {
-                    waddch(window, CURSOR_SPRITE | COLOR_PAIR(CURSOR_ID));
+                    for (int i = 0; i <= square_pixels; i++)
+                        waddch(window, CURSOR_SPRITE | COLOR_PAIR(CURSOR_ID));
                 } else {
-                    waddch(window, current_cell_info.sprites[0] | COLOR_PAIR(CURSOR_ID));
+                    for (int i = 0; i <= square_pixels; i++)
+                        waddch(window, current_cell_info.sprites[0] | COLOR_PAIR(CURSOR_ID));
                 }
             } else {
-                waddch(window, current_cell_info.sprites[0] | A_PROTECT | COLOR_PAIR(current_cell_info.colors[0]));
+                for (int i = 0; i <= square_pixels; i++) {
+                    if (map.cells[current].type == FIRE)
+                        waddch(window, cells_info[FIRE].sprites[rand() % 2] | COLOR_PAIR(cells_info[FIRE].colors[rand() % 2]));
+                    else
+                        waddch(window, current_cell_info.sprites[0] | A_PROTECT | COLOR_PAIR(current_cell_info.colors[0]));
+                }
 
-                if (map.cells[current].type == FIRE) {
+                if (map.cells[current].type == FIRE && !simple_fire) {
                     //int neighbors[8] = {current-map.width-1, current-map.width, current-map.width+1, current-1, current+1, current+map.width-1, current+map.width, current+map.width+1};
                     int neighbors_x[8] = {x-1, x, x+1, x-1, x+1, x-1, x, x+1};
                     int neighbors_y[8] = {y-1, y-1, y-1, y, y, y+1, y+1, y+1};
@@ -159,13 +172,14 @@ void render(WINDOW *window, CellsMap map, Cursor cursor, CellInfo cells_info[]) 
                             (rand() % 10 < 3))
                         {
                             map.cells[neighbors_y[i]*map.width + neighbors_x[i]].skip_render = true;
-                            wmove(window, neighbors_y[i]+1, neighbors_x[i]+1);
+                            wmove(window, neighbors_y[i] + 1, neighbors_x[i]*(1+square_pixels) + 1);
                             if (!incursor(neighbors_x[i], neighbors_y[i], cursor)) {
-                                waddch(window, cells_info[FIRE].sprites[rand() % 2] | COLOR_PAIR(cells_info[FIRE].colors[rand() % 2]));
+                                for (int i = 0; i <= square_pixels; i++)
+                                    waddch(window, cells_info[FIRE].sprites[rand() % 2] | COLOR_PAIR(cells_info[FIRE].colors[rand() % 2]));
                             }
                         }
                     }
-                } else if (map.cells[current].type == STEAM) {
+                } else if (map.cells[current].type == STEAM && !simple_steam) {
                     int neighbors_x[4] = {x, x+1, x, x-1};
                     int neighbors_y[4] = {y-1, y, y+1, y};
                     for (int i = 0; i < 4; i++) {
@@ -174,8 +188,9 @@ void render(WINDOW *window, CellsMap map, Cursor cursor, CellInfo cells_info[]) 
                         {
                             if (!incursor(neighbors_x[i], neighbors_y[i], cursor)) {
                                 map.cells[neighbors_y[i]*map.width + neighbors_x[i]].skip_render = true;
-                                wmove(window, neighbors_y[i]+1, neighbors_x[i]+1);
-                                waddch(window, cells_info[STEAM].sprites[0] | COLOR_PAIR(cells_info[STEAM].colors[1]));
+                                wmove(window, neighbors_y[i]*(1+square_pixels) + 1, neighbors_x[i]*(1+square_pixels) + 1);
+                                for (int i = 0; i <= square_pixels; i++)
+                                    waddch(window, cells_info[STEAM].sprites[0] | COLOR_PAIR(cells_info[STEAM].colors[1]));
                             }
                         }
                     }
@@ -377,8 +392,8 @@ void update(CellsMap map, bool only_water) {
                 }
                 if (map.cells[current].timer >= 50) {
                     boom:
-                    for (int cy = y-3; cy <= y+3; cy++) {
-                        for (int cx = x-7; cx <= x+7; cx++) {
+                    for (int cy = y-4; cy <= y+4; cy++) {
+                        for (int cx = x-4; cx <= x+4; cx++) {
                             if (cx >= 0 && cx <= (map.width-1) && cy >= 0 && cy <= (map.height-1)) {
                                 if (rand() % 6 == 0) continue;
                                 
@@ -386,7 +401,7 @@ void update(CellsMap map, bool only_water) {
 
                                 if (cx >= x-1 && cx <= x+1 && cy >= y-1 && cy <= y+1) {
                                     map.cells[ncurrent].type = EMPTY;
-                                } else if (cx >= x-4 && cx <= x+4 && cy >= y-2 && cy <= y+2) {
+                                } else if (cx >= x-2 && cx <= x+2 && cy >= y-2 && cy <= y+2) {
                                     map.cells[ncurrent].type = FIRE;
                                 } else if (map.cells[ncurrent].type != EMPTY) {
                                     int nx = cx + sign(cx-x) * (rand() % (abs(x-cx)+4));
@@ -420,6 +435,7 @@ void update(CellsMap map, bool only_water) {
 typedef struct {
     Cursor *cr; // Указатель на структуру курсора
     CellsMap *mp; // Структура с массивом ячеек
+    bool sp; // Флаг квадратных пикселей
 } InputThreadArgs;
 
 bool run = true;
@@ -432,6 +448,7 @@ pthread_cond_t cellselect_cnd;
 void *input_thread_loop(void *args) {
     Cursor *curs = ((InputThreadArgs *)args)->cr;
     CellsMap *map = ((InputThreadArgs *)args)->mp;
+    bool square_pixels = ((InputThreadArgs *)args)->sp;
 
     bool button1 = false; // Нажата ли ЛКМ
     bool button3 = false; // Нажато ли колёсико мыши
@@ -439,7 +456,6 @@ void *input_thread_loop(void *args) {
 
     do {
         int c = getch();
-        if (pause && c != 'p' && c != 'q') continue; 
 
         MEVENT event;
         switch (c) {
@@ -477,7 +493,7 @@ void *input_thread_loop(void *args) {
         case KEY_MOUSE:
             if (getmouse(&event) == OK) {
                 pthread_mutex_lock(&curs_mtx);
-                if (event.x > 0 && event.x < map->width+1) curs->x = event.x-1;
+                if (event.x > 0 && (event.x) / (1+square_pixels) < map->width) curs->x = (event.x-1) / (1+square_pixels);
                 if (event.y > 0 && event.y < map->height+1) curs->y = event.y-1;
 
                 if (event.bstate == BUTTON1_PRESSED) {
@@ -544,11 +560,11 @@ void *input_thread_loop(void *args) {
             break;
         }
         if (button1 || button3 || space) {
-            int y = curs->y-(curs->brush_size/2);
+            int y = curs->y-(curs->brush_size/(2-square_pixels) - square_pixels);
             if (y < 0) y = 0;
 
             pthread_mutex_lock(&map_mtx);
-            for (; y <= curs->y+(curs->brush_size/2) && y <= (map->height-1); y++) {
+            for (; y <= curs->y+(curs->brush_size/(2-square_pixels) - square_pixels) && y <= (map->height-1); y++) {
                 int x = curs->x-curs->brush_size+1;
                 if (x < 0) x = 0;
                 for (; x <= curs->x+curs->brush_size-1 && x <= (map->width-1); x++) {
@@ -576,8 +592,100 @@ int main(int argc, char *argv[]) {
 
     char *prog = argv[0];
     int target_tps = DEFAULT_TARGET_TPS;
-    if (argc > 1) {
-        target_tps = atoi(argv[1]);
+    int water_iterations = DEFAULT_WATER_ITERATIONS;
+    bool no_colors = false; // Отключение цветов
+    bool square_pixels = false; // Рисовать 2 символа на клетку
+    bool simple_fire = false; // Упрощённое рисование огня
+    bool simple_steam = false; // Упрощённое рисование пара
+    bool help = false;
+
+    while (--argc) {
+        char *arg = *(++argv);
+
+        if (arg[0] == '-' && arg[1] != '-' && arg[1] != 'T' && arg[1] != 'w') {
+            char flag;
+            while ((flag = *(++arg))) {
+                switch (flag) {
+                case 'h':
+                    help = true;
+                    break;
+                case 'n':
+                    no_colors = true;
+                    break;
+                case 's':
+                    square_pixels = true;
+                    break;
+                case 'f':
+                    simple_fire = true;
+                    break;
+                case 't':
+                    simple_steam = true;
+                    break;
+                default:
+                    fprintf(stderr, "%s: illegal flag '%c'\n", prog, flag);
+                    return 1;
+                }
+            }
+        } else if (arg[0] == '-' && (arg[1] == '-' || arg[1] == 'T' || arg[1] == 'w')) {
+            if (strcmp(arg, "--no-colors") == 0) {
+                no_colors = true;
+            } else if (strcmp(arg, "--square") == 0) {
+                square_pixels = true;
+            } else if (strcmp(arg, "--simple-fire") == 0) {
+                simple_fire = true;
+            } else if (strcmp(arg, "--simple-steam") == 0) {
+                simple_steam = true;
+            } else if (strcmp(arg, "--tps") == 0 || strcmp(arg, "-T") == 0) {
+                if (argc == 1) {
+                    fprintf(stderr, "%s: no value for option '%s'\n", prog, arg);
+                    return 1;
+                }
+                char *value_str = *(++argv); // Указатель на начало строки с числом TPS
+                argc--; 
+                
+                char *endp;
+                target_tps = strtoul(value_str, &endp, 10);
+                if (*endp != '\0') {
+                    fprintf(stderr, "%s: illegal value '%s' for option '%s'\n", prog, value_str, arg);
+                    return 1;
+                }
+            } else if (strcmp(arg, "--water") == 0 || strcmp(arg, "-w") == 0) {
+                if (argc == 1) {
+                    fprintf(stderr, "%s: no value for option '%s'\n", prog, arg);
+                    return 1;
+                }
+                char *value_str = *(++argv); // Указатель на начало строки с числом итераций для воды
+                argc--;
+                
+                char *endp;
+                water_iterations = strtoul(value_str, &endp, 10);
+                if (*endp != '\0') {
+                    fprintf(stderr, "%s: illegal value '%s' for option '%s'\n", prog, value_str, arg);
+                    return 1;
+                }
+                if (water_iterations == 0) water_iterations = 1;
+            } else if (strcmp(arg, "--help") == 0) {
+                help = true;
+            } else {
+                fprintf(stderr, "%s: illegal option '%s'\n", prog, arg);
+                return 1;
+            }
+        }
+    }
+
+    if (help) {
+        printf("\
+Usage: %s [options]\n\
+Options:\n\
+    --help, -h              Выводит это сообщение\n\
+    --no-colors, -n         Отключает цвета в выводе\n\
+    --square, -s            Делает клетки квадратными, то есть в два символа\n\
+    --simple-fire, -f       Включает упрощённое рисование огня\n\
+    --simple-steam, -t      Включает упрощённое рисование пара\n\
+    --tps, -T <number>      Устанавливает значение TPS (по умолчанию %d)\n\
+    --water, -w <number>    Устанавливает для воды количество итераций за тик (по умолчанию %d)\n",
+               prog, DEFAULT_TARGET_TPS, DEFAULT_WATER_ITERATIONS);
+        return 0;
     }
 
     if (!initscr()) {
@@ -598,32 +706,34 @@ int main(int argc, char *argv[]) {
     box(win, 0, 0);
     refresh();
     
-    start_color();
-    init_color(COLOR_YELLOW,    clr(220),   clr(217),   clr(37));   // rgb(220,217,37)
-    init_color(COLOR_BLUE,      clr(36),    clr(114),   clr(200));  // rgb(36,114,200)
-    init_color(COLOR_GRAY,      clr(140),   clr(140),   clr(140));  // rgb(140,140,140)
-    init_color(COLOR_DARKGRAY,  clr(51),    clr(51),    clr(51));   // rgb(51,51,51)
-    init_color(COLOR_BROWN,     clr(102),   clr(51),    0);         // rgb(102,51,0)
-    init_color(COLOR_RED,       clr(205),   clr(49),    clr(49));   // rgb(205, 49, 49)
-    init_color(COLOR_ORANGE,    clr(255),   clr(127),   0);         // rgb(255,127,0)
-    init_color(COLOR_GREEN,     clr(13),    clr(188),   clr(121));  // rgb(13,188,121)
-    init_color(COLOR_CYAN,      clr(129),   clr(160),   clr(200));  // rgb(129,160,200)
-    init_color(COLOR_CYAN_2,    clr(97),    clr(129),   clr(167));  // rgb(97, 129, 167)
-    init_color(COLOR_WHITE,     clr(255),   clr(255),   clr(255));  // rgb(255, 255, 255)
-    init_color(COLOR_BLACK,     0,          0,          0);         // rgb(0,0,0)
+    if (!no_colors) {
+        start_color();
+        init_color(COLOR_YELLOW,    clr(220),   clr(217),   clr(37));   // rgb(220,217,37)
+        init_color(COLOR_BLUE,      clr(36),    clr(114),   clr(200));  // rgb(36,114,200)
+        init_color(COLOR_GRAY,      clr(140),   clr(140),   clr(140));  // rgb(140,140,140)
+        init_color(COLOR_DARKGRAY,  clr(51),    clr(51),    clr(51));   // rgb(51,51,51)
+        init_color(COLOR_BROWN,     clr(102),   clr(51),    0);         // rgb(102,51,0)
+        init_color(COLOR_RED,       clr(205),   clr(49),    clr(49));   // rgb(205, 49, 49)
+        init_color(COLOR_ORANGE,    clr(255),   clr(127),   0);         // rgb(255,127,0)
+        init_color(COLOR_GREEN,     clr(13),    clr(188),   clr(121));  // rgb(13,188,121)
+        init_color(COLOR_CYAN,      clr(129),   clr(160),   clr(200));  // rgb(129,160,200)
+        init_color(COLOR_CYAN_2,    clr(97),    clr(129),   clr(167));  // rgb(97, 129, 167)
+        init_color(COLOR_WHITE,     clr(255),   clr(255),   clr(255));  // rgb(255, 255, 255)
+        init_color(COLOR_BLACK,     0,          0,          0);         // rgb(0,0,0)
 
-    init_pair(EMPTY, COLOR_WHITE, COLOR_BLACK);
-    init_pair(SAND, COLOR_GRAY, COLOR_YELLOW);
-    init_pair(WATER, COLOR_WHITE, COLOR_BLUE);
-    init_pair(STONE, COLOR_GRAY, COLOR_DARKGRAY);
-    init_pair(WOOD, COLOR_WHITE, COLOR_BROWN);
-    init_pair(ASH, COLOR_DARKGRAY, COLOR_GRAY);
-    init_pair(FIRE, COLOR_WHITE, COLOR_RED);
-    init_pair(FIRE+CURSOR_ID, COLOR_DARKGRAY, COLOR_ORANGE);
-    init_pair(BOMB, COLOR_GRAY, COLOR_GREEN);
-    init_pair(STEAM, COLOR_GRAY, COLOR_CYAN);
-    init_pair(STEAM+CURSOR_ID, COLOR_GRAY, COLOR_CYAN_2);
-    init_pair(CURSOR_ID, COLOR_BLACK, COLOR_WHITE);
+        init_pair(EMPTY, COLOR_WHITE, COLOR_BLACK);
+        init_pair(SAND, COLOR_GRAY, COLOR_YELLOW);
+        init_pair(WATER, COLOR_WHITE, COLOR_BLUE);
+        init_pair(STONE, COLOR_GRAY, COLOR_DARKGRAY);
+        init_pair(WOOD, COLOR_WHITE, COLOR_BROWN);
+        init_pair(ASH, COLOR_DARKGRAY, COLOR_GRAY);
+        init_pair(FIRE, COLOR_WHITE, COLOR_RED);
+        init_pair(FIRE+CURSOR_ID, COLOR_DARKGRAY, COLOR_ORANGE);
+        init_pair(BOMB, COLOR_GRAY, COLOR_GREEN);
+        init_pair(STEAM, COLOR_GRAY, COLOR_CYAN);
+        init_pair(STEAM+CURSOR_ID, COLOR_GRAY, COLOR_CYAN_2);
+        init_pair(CURSOR_ID, COLOR_BLACK, COLOR_WHITE);
+    }
 
     CellInfo cells_info[] = {
         {" ", "Empty", (short[]){EMPTY}},
@@ -640,6 +750,11 @@ int main(int argc, char *argv[]) {
     wattron(win, COLOR_PAIR(EMPTY));
 
     CellsMap map = {.cells = NULL, .width = COLS-2, .height = LINES-2};
+    
+    if (square_pixels) {
+        map.width /= 2;
+    }
+
     map.cells = calloc(MAPW*MAPH, sizeof(Cell));
     if (map.cells == NULL) {
         fprintf(stderr, "%s: error allocating memory\n", prog);
@@ -671,7 +786,7 @@ int main(int argc, char *argv[]) {
     pthread_mutex_init(&cellselect_mtx, NULL);
     pthread_cond_init(&cellselect_cnd, NULL);
 
-    InputThreadArgs input_thrd_args = {.cr = &curs, .mp = &map};
+    InputThreadArgs input_thrd_args = {.cr = &curs, .mp = &map, .sp = square_pixels};
     pthread_t input_thrd;
     pthread_create(&input_thrd, NULL, input_thread_loop, &input_thrd_args);
     pthread_detach(input_thrd);
@@ -685,14 +800,6 @@ int main(int argc, char *argv[]) {
             refresh();
 
             win_change = false;
-        }
-
-        if (pause) {
-            wmove(win, 1, getmaxx(win)-2-6);
-            waddstr(win, "Paused");
-            wrefresh(win);
-            
-            continue;
         }
 
         if (cellselect_open) {
@@ -802,11 +909,19 @@ int main(int argc, char *argv[]) {
 
         clock_t start_clock = clock();
 
-        update(map, false);
-        for (int i = 0; i < WATER_ITERATIONS-1; i++)
-            update(map, true);
-        
-        render(win, map, curs, cells_info);
+        if (!pause) {
+            update(map, false);
+            for (int i = 0; i < water_iterations-1; i++)
+                update(map, true);
+        }
+
+        render(win, map, curs, cells_info, square_pixels, simple_fire, simple_steam);
+
+        if (pause) {
+            wmove(win, 1, getmaxx(win)-2-6);
+            waddstr(win, "Paused");
+            wrefresh(win);
+        }
 
         if (target_tps > 0) {
             struct timespec delay = {0, 0};
