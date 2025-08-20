@@ -440,6 +440,7 @@ typedef struct {
 
 bool run = true;
 bool pause = false;
+bool step = false; // Сделать один шаг песочницы во время паузы
 bool cellselect_open = false;
 pthread_mutex_t cellselect_mtx;
 pthread_cond_t cellselect_cnd;
@@ -550,6 +551,11 @@ void *input_thread_loop(void *args) {
             break;
         case 'p':
             pause ^= 1;
+            break;
+        case '\n':
+        case '\r':
+        case KEY_ENTER:
+            step = true;
             break;
         default:
             if (isdigit(c) && (c-'0' < NUM_CELL_TYPES)) {
@@ -909,10 +915,11 @@ Options:\n\
 
         clock_t start_clock = clock();
 
-        if (!pause) {
+        if (!pause || step) {
             update(map, false);
             for (int i = 0; i < water_iterations-1; i++)
                 update(map, true);
+            step = false;
         }
 
         render(win, map, curs, cells_info, square_pixels, simple_fire, simple_steam);
