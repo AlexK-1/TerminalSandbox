@@ -1,4 +1,8 @@
 main
+curses.h
+
 test*
 log*
+
 .*/
+build/

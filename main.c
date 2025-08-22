@@ -4,9 +4,24 @@
 #include <stdlib.h>
 #include <stdbool.h>
 #include <ctype.h>
-#include <ncurses.h>
 #include <pthread.h>
 #include <signal.h>
+#include <locale.h>
+
+#ifdef _WIN32
+
+#include <windows.h>
+#undef MOUSE_MOVED // Компилятор жаловался, что MOUSE_MOVED переопределяется в curses.h, поэтому вот
+
+#define PDC_DLL_BUILD
+#define PDC_NCMOUSE
+#include <curses.h>
+
+#define resizeterm resize_term
+
+#else
+#include <ncurses.h>
+#endif
 
 #define NS 1000000000L // Количество наносекунд в секунде
 #define DEFAULT_TARGET_TPS 30
@@ -188,7 +203,7 @@ void render(WINDOW *window, CellsMap map, Cursor cursor, CellInfo cells_info[], 
                         {
                             if (!incursor(neighbors_x[i], neighbors_y[i], cursor)) {
                                 map.cells[neighbors_y[i]*map.width + neighbors_x[i]].skip_render = true;
-                                wmove(window, neighbors_y[i]*(1+square_pixels) + 1, neighbors_x[i]*(1+square_pixels) + 1);
+                                wmove(window, neighbors_y[i] + 1, neighbors_x[i]*(1+square_pixels) + 1);
                                 for (int i = 0; i <= square_pixels; i++)
                                     waddch(window, cells_info[STEAM].sprites[0] | COLOR_PAIR(cells_info[STEAM].colors[1]));
                             }
@@ -197,7 +212,9 @@ void render(WINDOW *window, CellsMap map, Cursor cursor, CellInfo cells_info[], 
                 }
             }
         }
+        wnoutrefresh(window);
     }
+
     pthread_mutex_unlock(&map_mtx);
 
     CellInfo brush_info = cells_info[cursor.brush];
@@ -214,7 +231,8 @@ void render(WINDOW *window, CellsMap map, Cursor cursor, CellInfo cells_info[], 
     wmove(window, 1, 6);
     waddstr(window, brush_info.name);
 
-    wrefresh(window);
+    wnoutrefresh(window);
+    doupdate();
 }
 
 void update(CellsMap map, bool only_water) {
@@ -442,6 +460,7 @@ bool run = true;
 bool pause = false;
 bool step = false; // Сделать один шаг песочницы во время паузы
 bool cellselect_open = false;
+bool win_change = false;
 pthread_mutex_t cellselect_mtx;
 pthread_cond_t cellselect_cnd;
 
@@ -557,6 +576,9 @@ void *input_thread_loop(void *args) {
         case KEY_ENTER:
             step = true;
             break;
+        case KEY_RESIZE:
+            win_change = true;
+            break;
         default:
             if (isdigit(c) && (c-'0' < NUM_CELL_TYPES)) {
                 pthread_mutex_lock(&curs_mtx);
@@ -587,14 +609,37 @@ void *input_thread_loop(void *args) {
     return NULL;
 }
 
-bool win_change = false;
-
+#ifdef SIGWINCH
 void signal_win_change(void) {
     win_change = true;
 }
+#endif
+
+#ifdef _WIN32
+
+void win_enable_ansi(void) {
+    HANDLE handle_out = GetStdHandle(STD_OUTPUT_HANDLE);
+    HANDLE handle_in = GetStdHandle(STD_INPUT_HANDLE);
+    DWORD dw_mode = 0;
+
+    GetConsoleMode(handle_out, &dw_mode);
+    dw_mode |= ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+    SetConsoleMode(handle_out, dw_mode);
+
+    GetConsoleMode(handle_in, &dw_mode);
+    dw_mode |= ENABLE_WINDOW_INPUT | ENABLE_MOUSE_INPUT | ENABLE_EXTENDED_FLAGS;
+    SetConsoleMode(handle_in, dw_mode);
+}
+#endif
 
 int main(int argc, char *argv[]) {
-    signal(SIGWINCH, (void (*)(int))signal_win_change);
+    #ifdef SIGWINCH
+        signal(SIGWINCH, (void (*)(int))signal_win_change);
+    #endif
+
+    #ifdef _WIN32
+        win_enable_ansi();
+    #endif
 
     char *prog = argv[0];
     int target_tps = DEFAULT_TARGET_TPS;
@@ -680,6 +725,10 @@ int main(int argc, char *argv[]) {
     }
 
     if (help) {
+        #ifdef _WIN32
+            SetConsoleCP(CP_UTF8);
+            setlocale(LC_ALL, "ru_RU.UTF-8");
+        #endif
         printf("\
 Usage: %s [options]\n\
 Options:\n\
@@ -705,7 +754,10 @@ Options:\n\
     keypad(stdscr, TRUE);
     mousemask(ALL_MOUSE_EVENTS | REPORT_MOUSE_POSITION, NULL);
     mouseinterval(0);
-    printf("\033[?1002h\n");
+    puts("\033[?1002h");
+    #ifdef _WIN32
+        fflush(stdout);
+    #endif
     refresh();
 
     WINDOW *win = newwin(LINES, COLS, 0, 0);
@@ -765,19 +817,13 @@ Options:\n\
     if (map.cells == NULL) {
         fprintf(stderr, "%s: error allocating memory\n", prog);
 
-        printf("\033[?1003l\n");
+        puts("\033[?1002l");
         curs_set(1);
         delwin(win);
         endwin();
 
         return 1;
     }
-    //memset(map, EMPTY, sizeof(Cell) * MAPSIZE);
-    /*for (int y = 4; y < 14; y++) {
-        for (int x = 20; x < 100; x++) {
-            map.cells[y*MAPW + x].type = STONE;
-        }
-    }*/
     /*for (int i = 0; i < map.width*map.height; i++) {
         if (rand() % 2)
             map.cells[i].type = EMPTY;
@@ -935,7 +981,7 @@ Options:\n\
             if (target_tps == 1) {
                 delay.tv_sec = 1;
             } else {
-                delay.tv_nsec = (NS / target_tps) - ((clock()-start_clock) / (CLOCKS_PER_SEC * NS));
+                delay.tv_nsec = (NS / target_tps) - ((clock()-start_clock) * NS / CLOCKS_PER_SEC);
             }
 
             nanosleep(&delay, NULL);
@@ -947,7 +993,7 @@ Options:\n\
     pthread_mutex_destroy(&cellselect_mtx);
     pthread_cond_destroy(&cellselect_cnd);
 
-    printf("\033[?1003l\n");
+    puts("\033[?1002l\n");
     curs_set(1);
     delwin(win);
     endwin();
