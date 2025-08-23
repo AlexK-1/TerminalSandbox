@@ -37,7 +37,8 @@
 #define random() (rand() % 100 / 100.0f)
 #define sign(x) (x < 0 ? -1 : 1)
 #define clr(x) (short)(x/255.0f * 1000)
-#define incursor(x_, y_, cursor) (x_ >= cursor.x-cursor.brush_size+1 && x_ <= cursor.x+cursor.brush_size-1 && \
+#define incursor(x_, y_, cursor) (!cursor.hide && \
+                                  x_ >= cursor.x-cursor.brush_size+1 && x_ <= cursor.x+cursor.brush_size-1 && \
                                   y_ >= cursor.y-(cursor.brush_size/(2-square_pixels))+square_pixels && y_ <= cursor.y+(cursor.brush_size/(2-square_pixels))-square_pixels) // Находится ли кнопка в пределах курсора
 
 #define canmove(cellidx) ((map.cells[cellidx].type == EMPTY  ||  \
@@ -108,6 +109,7 @@ typedef struct {
     int x, y;
     CellType brush;
     unsigned short brush_size;
+    bool hide;
 } Cursor;
 
 // Перетасовывает массив чисел
@@ -454,6 +456,7 @@ typedef struct {
     Cursor *cr; // Указатель на структуру курсора
     CellsMap *mp; // Структура с массивом ячеек
     bool sp; // Флаг квадратных пикселей
+    bool hc; // Автоматически скрывать курсор
 } InputThreadArgs;
 
 bool run = true;
@@ -469,10 +472,13 @@ void *input_thread_loop(void *args) {
     Cursor *curs = ((InputThreadArgs *)args)->cr;
     CellsMap *map = ((InputThreadArgs *)args)->mp;
     bool square_pixels = ((InputThreadArgs *)args)->sp;
+    bool auto_hide = ((InputThreadArgs *)args)->hc;
 
     bool button1 = false; // Нажата ли ЛКМ
-    bool button3 = false; // Нажато ли колёсико мыши
+    bool button2 = false; // Нажато ли колёсико мыши
     bool space = false; // Был ли нажат пробел
+
+    unsigned timer = 0;
 
     do {
         int c = getch();
@@ -521,9 +527,9 @@ void *input_thread_loop(void *args) {
                 } else if (event.bstate == BUTTON1_RELEASED) {
                     button1 = false;
                 } else if (event.bstate == BUTTON2_PRESSED) {
-                    button3 = true;
+                    button2 = true;
                 } else if (event.bstate == BUTTON2_RELEASED) {
-                    button3 = false;
+                    button2 = false;
                 }
                 #ifdef BUTTON4_PRESSED
                 else if (event.bstate == BUTTON4_PRESSED) {
@@ -579,6 +585,11 @@ void *input_thread_loop(void *args) {
         case KEY_RESIZE:
             win_change = true;
             break;
+        case 'h':
+            pthread_mutex_lock(&curs_mtx);
+            curs->hide ^= 1;
+            pthread_mutex_unlock(&curs_mtx);
+            break;
         default:
             if (isdigit(c) && (c-'0' < NUM_CELL_TYPES)) {
                 pthread_mutex_lock(&curs_mtx);
@@ -587,7 +598,8 @@ void *input_thread_loop(void *args) {
             }
             break;
         }
-        if (button1 || button3 || space) {
+
+        if (button1 || button2 || space) {
             int y = curs->y-(curs->brush_size/(2-square_pixels) - square_pixels);
             if (y < 0) y = 0;
 
@@ -596,12 +608,24 @@ void *input_thread_loop(void *args) {
                 int x = curs->x-curs->brush_size+1;
                 if (x < 0) x = 0;
                 for (; x <= curs->x+curs->brush_size-1 && x <= (map->width-1); x++) {
-                    map->cells[y*map->width + x].type = (button3 ? EMPTY : curs->brush);
+                    map->cells[y*map->width + x].type = (button2 ? EMPTY : curs->brush);
                 }
             }
             pthread_mutex_unlock(&map_mtx);
 
             space = false;
+        }
+
+        if (auto_hide) {
+            pthread_mutex_lock(&curs_mtx);
+            if (c == KEY_MOUSE || c == '+' || c == '-' || c == ' ' || (c >= KEY_DOWN && c <= KEY_RIGHT) || button1 || button2 || space) {
+                timer = 0;
+                curs->hide = false;
+            } else {
+                if (timer < 500000) timer++;
+                else curs->hide = true;
+            }
+            pthread_mutex_unlock(&curs_mtx);
         }
         
     } while (run);
@@ -642,12 +666,16 @@ int main(int argc, char *argv[]) {
     #endif
 
     char *prog = argv[0];
+
     int target_tps = DEFAULT_TARGET_TPS;
     int water_iterations = DEFAULT_WATER_ITERATIONS;
+
     bool no_colors = false; // Отключение цветов
     bool square_pixels = false; // Рисовать 2 символа на клетку
     bool simple_fire = false; // Упрощённое рисование огня
     bool simple_steam = false; // Упрощённое рисование пара
+    bool hover = false; // Курсор всегда двигается за мышкой
+    bool auto_hide = false; // Автоматически скрывать курсор, когда он не двигается
     bool help = false;
 
     while (--argc) {
@@ -672,6 +700,12 @@ int main(int argc, char *argv[]) {
                 case 't':
                     simple_steam = true;
                     break;
+                case 'H':
+                    hover = true;
+                    break;
+                case 'a':
+                    auto_hide = true;
+                    break;
                 default:
                     fprintf(stderr, "%s: illegal flag '%c'\n", prog, flag);
                     return 1;
@@ -686,6 +720,10 @@ int main(int argc, char *argv[]) {
                 simple_fire = true;
             } else if (strcmp(arg, "--simple-steam") == 0) {
                 simple_steam = true;
+            } else if (strcmp(arg, "--hover") == 0) {
+                hover = true;
+            } else if (strcmp(arg, "--auto-hide") == 0) {
+                auto_hide = true;
             } else if (strcmp(arg, "--tps") == 0 || strcmp(arg, "-T") == 0) {
                 if (argc == 1) {
                     fprintf(stderr, "%s: no value for option '%s'\n", prog, arg);
@@ -737,6 +775,8 @@ Options:\n\
     --square, -s            Делает клетки квадратными, то есть в два символа\n\
     --simple-fire, -f       Включает упрощённое рисование огня\n\
     --simple-steam, -t      Включает упрощённое рисование пара\n\
+    --hover, -H             Kypcop всегда будет следить за мышкой, a не только при нажатии\n\
+    --auto-hide, -a         Автоматически скрывать курсор, когда он не двигается\n\
     --tps, -T <number>      Устанавливает значение TPS (по умолчанию %d)\n\
     --water, -w <number>    Устанавливает для воды количество итераций за тик (по умолчанию %d)\n",
                prog, DEFAULT_TARGET_TPS, DEFAULT_WATER_ITERATIONS);
@@ -754,7 +794,7 @@ Options:\n\
     keypad(stdscr, TRUE);
     mousemask(ALL_MOUSE_EVENTS | REPORT_MOUSE_POSITION, NULL);
     mouseinterval(0);
-    puts("\033[?1002h");
+    printf("\033[?100%ch\n", (hover ? '3' : '2'));
     #ifdef _WIN32
         fflush(stdout);
     #endif
@@ -817,7 +857,7 @@ Options:\n\
     if (map.cells == NULL) {
         fprintf(stderr, "%s: error allocating memory\n", prog);
 
-        puts("\033[?1002l");
+        printf("\033[?100%cl\n", (hover ? '3' : '2'));
         curs_set(1);
         delwin(win);
         endwin();
@@ -838,7 +878,7 @@ Options:\n\
     pthread_mutex_init(&cellselect_mtx, NULL);
     pthread_cond_init(&cellselect_cnd, NULL);
 
-    InputThreadArgs input_thrd_args = {.cr = &curs, .mp = &map, .sp = square_pixels};
+    InputThreadArgs input_thrd_args = {.cr = &curs, .mp = &map, .sp = square_pixels, .hc = auto_hide};
     pthread_t input_thrd;
     pthread_create(&input_thrd, NULL, input_thread_loop, &input_thrd_args);
     pthread_detach(input_thrd);
@@ -993,7 +1033,7 @@ Options:\n\
     pthread_mutex_destroy(&cellselect_mtx);
     pthread_cond_destroy(&cellselect_cnd);
 
-    puts("\033[?1002l\n");
+    printf("\033[?100%cl\n", (hover ? '3' : '2'));
     curs_set(1);
     delwin(win);
     endwin();
